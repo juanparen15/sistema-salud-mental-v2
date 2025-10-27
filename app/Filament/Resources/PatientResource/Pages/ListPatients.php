@@ -4,10 +4,10 @@ namespace App\Filament\Resources\PatientResource\Pages;
 
 use App\Filament\Resources\PatientResource;
 use App\Imports\MentalHealthImport;
-use App\Imports\MentalHealthSystemImport;
 use App\Imports\PatientsImport;
 use Exception;
 use Filament\Actions;
+use Filament\Facades\Filament;
 use Filament\Resources\Pages\ListRecords;
 use Filament\Notifications\Notification;
 use Maatwebsite\Excel\Facades\Excel;
@@ -49,6 +49,13 @@ class ListPatients extends ListRecords
 
                             FileUpload::make('file')
                                 ->label('Archivo Excel')
+                                ->disk('public')
+                                ->directory('uploads')
+                                ->visibility('private')
+                                ->preserveFilenames()
+                                ->downloadable()
+                                ->openable()
+                                ->deletable()
                                 ->acceptedFileTypes([
                                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                                     'application/vnd.ms-excel'
@@ -62,6 +69,8 @@ class ListPatients extends ListRecords
                                 })
                                 ->columnSpanFull(),
                         ]),
+
+
 
                     Section::make('Información del Procesamiento')
                         ->description('Detalles de lo que se procesará automáticamente:')

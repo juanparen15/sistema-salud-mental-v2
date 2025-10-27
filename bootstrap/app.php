@@ -11,7 +11,19 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        //
+        // Configuración importante para Livewire
+        $middleware->web(append: [
+            \Illuminate\Session\Middleware\StartSession::class,
+        ]);
+        
+        // Excluir las rutas de Livewire del CSRF
+        $middleware->validateCsrfTokens(except: [
+            'livewire/upload-file',
+            'livewire/upload-file/*',
+        ]);
+        
+        // Si estás detrás de un proxy/load balancer
+        $middleware->trustProxies(at: '*');
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         //
