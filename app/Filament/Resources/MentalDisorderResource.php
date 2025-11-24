@@ -253,7 +253,7 @@ class MentalDisorderResource extends Resource
         return [
             'index' => Pages\ListMentalDisorders::route('/'),
             'create' => Pages\CreateMentalDisorder::route('/create'),
-            // 'view' => Pages\ViewMentalDisorder::route('/{record}'),
+            'view' => Pages\ViewMentalDisorder::route('/{record}'),
             'edit' => Pages\EditMentalDisorder::route('/{record}/edit'),
         ];
     }

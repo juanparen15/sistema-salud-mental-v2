@@ -29,7 +29,7 @@ return [
 
     'panel_user' => [
         'enabled' => true,
-        'name' => 'panel_user',
+        'name' => 'coordinador',
     ],
 
     'permission_prefixes' => [

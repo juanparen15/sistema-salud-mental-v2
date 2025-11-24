@@ -20,36 +20,26 @@ class UserSeeder extends Seeder
         // Crear usuario administrador por defecto
         User::create([
             'name' => 'Administrador',
-            'email' => 'admin@saludmental.local',
-            'password' => Hash::make('password'), // Cambiar en producción
-            'role' => 'admin',
+            'email' => 'sistemas@puertoboyaca-boyaca.gov.co',
+            'password' => Hash::make('Sistemas2025*'),
+            'role' => 'super_admin',
             'is_active' => true,
             'email_verified_at' => now(),
         ]);
 
         // Crear usuario profesional de ejemplo
         User::create([
-            'name' => 'Dr. Juan Pérez',
-            'email' => 'profesional@saludmental.local',
-            'password' => Hash::make('password'), // Cambiar en producción
-            'role' => 'professional',
-            'is_active' => true,
-            'email_verified_at' => now(),
-        ]);
-
-        // Crear coordinador de ejemplo
-        User::create([
-            'name' => 'María García',
-            'email' => 'coordinador@saludmental.local',
-            'password' => Hash::make('password'), // Cambiar en producción
-            'role' => 'coordinator',
+            'name' => 'Claudia Ciro',
+            'email' => 'salud@puertoboyaca-boyaca.gov.co',
+            'password' => Hash::make('Salud2025'), // Cambiar en producción
+            'role' => 'coordinador',
             'is_active' => true,
             'email_verified_at' => now(),
         ]);
 
         $this->command->info('✅ Usuarios de ejemplo creados exitosamente');
-        $this->command->info('📧 Email: admin@saludmental.local');
-        $this->command->info('🔑 Password: password');
+        $this->command->info('📧 Email: sistemas@puertoboyaca-boyaca.gov.co');
+        $this->command->info('🔑 Password: Sistemas2025*');
         $this->command->warn('⚠️  IMPORTANTE: Cambiar contraseña en producción');
     }
 }

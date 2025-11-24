@@ -60,7 +60,7 @@ class ListPatients extends ListRecords
                                     'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                                     'application/vnd.ms-excel'
                                 ])
-                                ->maxSize(20480) // 20MB para archivos grandes del sistema
+                                ->maxSize(20480)
                                 ->required()
                                 ->helperText(function (callable $get) {
                                     return $get('import_type') === 'mental_health_system'
@@ -69,8 +69,6 @@ class ListPatients extends ListRecords
                                 })
                                 ->columnSpanFull(),
                         ]),
-
-
 
                     Section::make('Información del Procesamiento')
                         ->description('Detalles de lo que se procesará automáticamente:')
@@ -142,7 +140,12 @@ class ListPatients extends ListRecords
                 ])
                 ->action(function (array $data) {
                     try {
-                        // Notificación inicial
+                        Log::info('========================================');
+                        Log::info('=== INICIO IMPORTACIÓN SALUD MENTAL ===');
+                        Log::info('========================================');
+                        Log::info('Tipo de importación:', ['type' => $data['import_type']]);
+                        Log::info('Archivo:', ['file' => $data['file']]);
+                        
                         Notification::make()
                             ->title('Iniciando Procesamiento...')
                             ->body('La importación ha comenzado. Este proceso puede tomar varios minutos dependiendo del tamaño del archivo.')
@@ -150,17 +153,46 @@ class ListPatients extends ListRecords
                             ->persistent()
                             ->send();
 
+                        Log::info('Iniciando transacción DB');
                         DB::beginTransaction();
+                        Log::info('Transacción iniciada correctamente');
 
                         if ($data['import_type'] === 'mental_health_system') {
-                            // Procesamiento especializado del sistema de salud mental
+                            Log::info('Creando instancia de MentalHealthImport');
                             $import = new MentalHealthImport();
+                            
+                            Log::info('Llamando a Excel::import()');
                             Excel::import($import, $data['file'], 'public');
+                            Log::info('Excel::import() completado');
+
+                            // Obtener contadores
+                            $imported = $import->getImportedCount();
+                            $updated = $import->getUpdatedCount();
+                            $cases = $import->getCasesCreated();
+                            $followups = $import->getFollowupsCreated();
+                            $skipped = $import->getSkippedCount();
+                            $errorCount = count($import->getErrors());
+
+                            Log::info('Resultados de la importación:', [
+                                'pacientes_nuevos' => $imported,
+                                'pacientes_actualizados' => $updated,
+                                'casos_creados' => $cases,
+                                'seguimientos_creados' => $followups,
+                                'registros_omitidos' => $skipped,
+                                'errores' => $errorCount
+                            ]);
 
                             $successMessage = $this->buildMentalHealthSuccessMessage($import);
                             $errors = $import->getErrors();
+                            
+                            if (!empty($errors)) {
+                                Log::warning('Errores encontrados durante la importación:', [
+                                    'total_errores' => count($errors),
+                                    'primeros_5' => array_slice($errors, 0, 5)
+                                ]);
+                            }
                         } else {
-                            // Procesamiento genérico
+                            Log::info('Procesamiento genérico');
                             $import = new PatientsImport();
                             Excel::import($import, $data['file'], 'public');
 
@@ -169,11 +201,16 @@ class ListPatients extends ListRecords
                         }
 
                         // Limpiar archivo temporal
+                        Log::info('Limpiando archivo temporal');
                         if (Storage::disk('public')->exists($data['file'])) {
                             Storage::disk('public')->delete($data['file']);
+                            Log::info('Archivo temporal eliminado');
                         }
 
+                        Log::info('Ejecutando COMMIT de la transacción');
                         DB::commit();
+                        Log::info('✅ COMMIT EXITOSO - Datos guardados en BD');
+                        Log::info('========================================');
 
                         // Notificación de éxito
                         Notification::make()
@@ -187,20 +224,30 @@ class ListPatients extends ListRecords
                         if (!empty($errors)) {
                             $this->showImportWarnings($errors);
                         }
-                    } catch (Exception $e) {
-                        DB::rollBack();
 
-                        // Log del error completo
-                        Log::error('Error en importación de salud mental', [
+                    } catch (Exception $e) {
+                        Log::error('========================================');
+                        Log::error('=== ERROR EN IMPORTACIÓN ===');
+                        Log::error('========================================');
+                        
+                        DB::rollBack();
+                        Log::error('❌ ROLLBACK ejecutado - Datos NO guardados');
+
+                        Log::error('Detalles del error:', [
                             'message' => $e->getMessage(),
-                            'file' => $data['file'] ?? 'unknown',
+                            'file' => $e->getFile(),
                             'line' => $e->getLine(),
+                            'uploaded_file' => $data['file'] ?? 'unknown'
+                        ]);
+                        
+                        Log::error('Stack trace:', [
                             'trace' => $e->getTraceAsString()
                         ]);
 
                         // Limpiar archivo en caso de error
                         if (isset($data['file']) && Storage::disk('public')->exists($data['file'])) {
                             Storage::disk('public')->delete($data['file']);
+                            Log::info('Archivo temporal eliminado después del error');
                         }
 
                         Notification::make()
@@ -251,9 +298,6 @@ class ListPatients extends ListRecords
         ];
     }
 
-    /**
-     * Construir mensaje de éxito para importación de salud mental
-     */
     private function buildMentalHealthSuccessMessage(MentalHealthImport $import): string
     {
         $newPatients = $import->getImportedCount();
@@ -264,14 +308,10 @@ class ListPatients extends ListRecords
 
         $message = "<div class='space-y-2'>";
         $message .= "<div class='font-semibold mb-3'>Resumen de Procesamiento:</div>";
-
-        // Pacientes
         $message .= "<div class='grid grid-cols-2 gap-2 text-sm'>";
         $message .= "<div><span class='font-medium'>Pacientes nuevos:</span> <strong class='text-green-600'>{$newPatients}</strong></div>";
         $message .= "<div><span class='font-medium'>Pacientes actualizados:</span> <strong class='text-blue-600'>{$updatedPatients}</strong></div>";
         $message .= "</div>";
-
-        // Casos y seguimientos
         $message .= "<div class='grid grid-cols-2 gap-2 text-sm mt-2'>";
         $message .= "<div><span class='font-medium'>Casos creados:</span> <strong class='text-purple-600'>{$totalCases}</strong></div>";
         $message .= "<div><span class='font-medium'>Seguimientos:</span> <strong class='text-orange-600'>{$totalFollowups}</strong></div>";
@@ -289,9 +329,6 @@ class ListPatients extends ListRecords
         return $message;
     }
 
-    /**
-     * Construir mensaje de éxito para importación genérica
-     */
     private function buildGenericSuccessMessage($import): string
     {
         $imported = method_exists($import, 'getImportedCount') ? $import->getImportedCount() : 0;
@@ -311,9 +348,6 @@ class ListPatients extends ListRecords
         return $message;
     }
 
-    /**
-     * Mostrar advertencias de importación
-     */
     private function showImportWarnings(array $errors): void
     {
         $errorCount = count($errors);
@@ -340,9 +374,6 @@ class ListPatients extends ListRecords
             ->send();
     }
 
-    /**
-     * Construir mensaje de error
-     */
     private function buildErrorMessage(Exception $e): string
     {
         $message = "<div class='space-y-2'>";
@@ -364,9 +395,6 @@ class ListPatients extends ListRecords
         return $message;
     }
 
-    /**
-     * Mostrar estadísticas del sistema
-     */
     private function showSystemStatistics(): void
     {
         try {
@@ -409,8 +437,6 @@ class ListPatients extends ListRecords
 
     protected function getHeaderWidgets(): array
     {
-        return [
-            // Aquí puedes agregar widgets de estadísticas si los creas
-        ];
+        return [];
     }
 }

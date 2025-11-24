@@ -38,7 +38,7 @@ class SubstanceConsumptionResource extends Resource
                             ->preload()
                             ->required(),
                     ]),
-                    
+
                 Forms\Components\Section::make('Datos de Ingreso')
                     ->schema([
                         Forms\Components\Grid::make(2)
@@ -48,7 +48,7 @@ class SubstanceConsumptionResource extends Resource
                                     ->required()
                                     ->default(now())
                                     ->native(false),
-                                    
+
                                 Forms\Components\Select::make('admission_via')
                                     ->label('Ingreso Por')
                                     ->options([
@@ -63,14 +63,14 @@ class SubstanceConsumptionResource extends Resource
                                     ->native(false),
                             ]),
                     ]),
-                    
+
                 Forms\Components\Section::make('Información del Consumo')
                     ->schema([
                         Forms\Components\TextInput::make('diagnosis')
                             ->label('Diagnóstico')
                             ->required()
                             ->maxLength(500),
-                            
+
                         Forms\Components\TagsInput::make('substances_used')
                             ->label('Sustancias Utilizadas')
                             ->placeholder('Agregar sustancia')
@@ -87,7 +87,7 @@ class SubstanceConsumptionResource extends Resource
                                 'Benzodiacepinas',
                                 'Anfetaminas',
                             ]),
-                            
+
                         Forms\Components\Select::make('consumption_level')
                             ->label('Nivel de Consumo')
                             ->options([
@@ -99,13 +99,13 @@ class SubstanceConsumptionResource extends Resource
                             ->required()
                             ->default('Bajo Riesgo')
                             ->native(false),
-                            
+
                         Forms\Components\Textarea::make('additional_observation')
                             ->label('Observaciones Adicionales')
                             ->rows(4)
                             ->maxLength(1000),
                     ]),
-                    
+
                 Forms\Components\Section::make('Estado')
                     ->schema([
                         Forms\Components\Select::make('status')
@@ -131,38 +131,44 @@ class SubstanceConsumptionResource extends Resource
                     ->label('Paciente')
                     ->searchable()
                     ->sortable()
+                    ->copyable()
                     ->weight('bold'),
-                    
+
+                Tables\Columns\TextColumn::make('patient.document_number')
+                    ->label('Documento')
+                    ->searchable()
+                    ->sortable(),
+
                 Tables\Columns\TextColumn::make('admission_date')
                     ->label('Fecha Ingreso')
                     ->dateTime('d/m/Y')
                     ->sortable(),
-                    
+
                 Tables\Columns\TextColumn::make('diagnosis')
                     ->label('Diagnóstico')
                     ->limit(40)
                     ->wrap(),
-                    
+
                 Tables\Columns\TextColumn::make('consumption_level')
                     ->label('Nivel de Riesgo')
                     ->badge()
-                    ->color(fn (string $state): string => match ($state) {
+                    ->color(fn(string $state): string => match ($state) {
                         'Alto Riesgo' => 'danger',
                         'Riesgo Moderado' => 'warning',
                         'Bajo Riesgo' => 'success',
                         'Perjudicial' => 'danger',
                     }),
-                    
+
                 Tables\Columns\TextColumn::make('status')
                     ->label('Estado')
                     ->badge()
-                    ->color(fn (string $state): string => match ($state) {
+                    ->color(fn(string $state): string => match ($state) {
                         'active' => 'warning',
                         'inactive' => 'gray',
                         'in_treatment' => 'info',
                         'recovered' => 'success',
                     })
-                    ->formatStateUsing(fn (string $state): string => match ($state) {
+                    ->formatStateUsing(fn(string $state): string => match ($state) {
                         'active' => 'Activo',
                         'inactive' => 'Inactivo',
                         'in_treatment' => 'En Tratamiento',
@@ -178,7 +184,7 @@ class SubstanceConsumptionResource extends Resource
                         'Bajo Riesgo' => 'Bajo Riesgo',
                         'Perjudicial' => 'Perjudicial',
                     ]),
-                    
+
                 Tables\Filters\SelectFilter::make('status')
                     ->options([
                         'active' => 'Activo',
@@ -206,11 +212,11 @@ class SubstanceConsumptionResource extends Resource
         return [
             'index' => Pages\ListSubstanceConsumptions::route('/'),
             'create' => Pages\CreateSubstanceConsumption::route('/create'),
-            // 'view' => Pages\ViewSubstanceConsumption::route('/{record}'),
+            'view' => Pages\ViewSubstanceConsumption::route('/{record}'),
             'edit' => Pages\EditSubstanceConsumption::route('/{record}/edit'),
         ];
     }
-    
+
     public static function getNavigationBadge(): ?string
     {
         return static::getModel()::whereIn('status', ['active', 'in_treatment'])->count();

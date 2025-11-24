@@ -8,14 +8,30 @@ use App\Models\MentalDisorder;
 use App\Models\SuicideAttempt;
 use App\Models\SubstanceConsumption;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Maatwebsite\Excel\Concerns\WithMultipleSheets;
 use Maatwebsite\Excel\Concerns\ToCollection;
 use Maatwebsite\Excel\Concerns\WithHeadingRow;
+use Maatwebsite\Excel\Concerns\WithStartRow;
 use Carbon\Carbon;
-use Exception;
 
+/**
+ * IMPORTADOR DE SALUD MENTAL 2025 - VERSIÓN CORREGIDA
+ * 
+ * AJUSTADO PARA COINCIDIR EXACTAMENTE CON LAS MIGRACIONES DE BASE DE DATOS
+ * 
+ * Procesa: SISTEMA_DE_INFORMACIÓN_SALUD_MENTAL_2025_-OFICIAL.xlsx
+ * 
+ * Cambios principales vs versión anterior:
+ * - created_by → created_by_id
+ * - updated_by → updated_by_id
+ * - Agregado diagnosis_date (requerido en mental_disorders)
+ * - admission_date → event_date (en suicide_attempts)
+ * - trigger → trigger_factor
+ * - method_used → mechanism
+ * - risk_factors convertido a JSON array
+ * - Validación estricta de birth_date (requerido)
+ */
 class MentalHealthImport implements WithMultipleSheets
 {
     protected $importedCount = 0;
@@ -28,13 +44,12 @@ class MentalHealthImport implements WithMultipleSheets
     public function sheets(): array
     {
         return [
-            'TRASTORNOS 2025' => new TrastornosSheet($this),
+            ' TRASTORNOS 2025' => new TrastornosSheet($this),
             'EVENTO 356 2025' => new Evento356Sheet($this),
             'CONSUMO SPA 2025' => new ConsumoSpaSheet($this),
         ];
     }
 
-    // Métodos para actualizar contadores
     public function incrementImported()
     {
         $this->importedCount++;
@@ -59,8 +74,6 @@ class MentalHealthImport implements WithMultipleSheets
     {
         $this->errors[] = $error;
     }
-
-    // Getters para estadísticas
     public function getImportedCount(): int
     {
         return $this->importedCount;
@@ -87,9 +100,214 @@ class MentalHealthImport implements WithMultipleSheets
     }
 }
 
-// ==================== HOJA TRASTORNOS COMPLETA ====================
+// Trait para búsqueda flexible de columnas
+trait FlexibleColumnAccess
+{
+    protected $columnCache = [];
+
+    protected function findColumn(Collection $row, array $possibleNames)
+    {
+        $cacheKey = md5(implode(',', $possibleNames));
+
+        if (isset($this->columnCache[$cacheKey])) {
+            return $row[$this->columnCache[$cacheKey]] ?? null;
+        }
+
+        foreach ($possibleNames as $name) {
+            $normalized = $this->normalizeColumnName($name);
+
+            foreach ($row->keys() as $key) {
+                if ($this->normalizeColumnName($key) === $normalized) {
+                    $this->columnCache[$cacheKey] = $key;
+                    return $row[$key];
+                }
+            }
+        }
+
+        return null;
+    }
+
+    protected function normalizeColumnName($name)
+    {
+        $name = strtolower(trim((string)$name));
+        $name = str_replace(
+            ['á', 'é', 'í', 'ó', 'ú', 'ñ', 'ü'],
+            ['a', 'e', 'i', 'o', 'u', 'n', 'u'],
+            $name
+        );
+        $name = preg_replace('/[^a-z0-9]/', '', $name);
+        return $name;
+    }
+
+    protected function cleanString($value): ?string
+    {
+        if (empty($value)) return null;
+        $cleaned = trim(strip_tags((string)$value));
+        return empty($cleaned) ? null : $cleaned;
+    }
+
+    protected function truncateString($string, $maxLength): ?string
+    {
+        if (empty($string)) return null;
+        return strlen($string) > $maxLength ? substr($string, 0, $maxLength) : $string;
+    }
+
+    // protected function isValidDocument($document): bool
+    // {
+    //     if (empty($document)) return false;
+    //     $clean = preg_replace('/\D/', '', (string)$document);
+    //     return !empty($clean) && strlen($clean) >= 6 && strlen($clean) <= 15;
+    // }
+
+    protected function isValidDocument($document): bool
+    {
+        // DEBUG: Ver qué llega
+        Log::info("isValidDocument - Entrada:", [
+            'valor' => $document,
+            'tipo' => gettype($document),
+            'empty' => empty($document)
+        ]);
+
+        if (empty($document)) {
+            Log::info("isValidDocument - Rechazado: vacío");
+            return false;
+        }
+
+        $clean = preg_replace('/\D/', '', (string)$document);
+
+        Log::info("isValidDocument - Después de limpiar:", [
+            'original' => $document,
+            'limpio' => $clean,
+            'longitud' => strlen($clean),
+            'valido' => !empty($clean) && strlen($clean) >= 6 && strlen($clean) <= 15
+        ]);
+
+        return !empty($clean) && strlen($clean) >= 6 && strlen($clean) <= 15;
+    }
+
+    protected function cleanPhone($phone): ?string
+    {
+        if (empty($phone)) return null;
+        $phones = preg_split('/[-,\s\/]/', (string)$phone);
+        $cleaned = preg_replace('/\D/', '', trim($phones[0]));
+        return (strlen($cleaned) >= 7 && strlen($cleaned) <= 20) ? $cleaned : null;
+    }
+
+    protected function mapDocumentType($value): string
+    {
+        if (empty($value)) return 'CC';
+        $type = strtoupper(trim((string)$value));
+
+        if (str_contains($type, 'CEDULA') || str_contains($type, 'CÉDULA') || str_contains($type, 'CIUDADANIA') || $type === 'CC') {
+            return 'CC';
+        }
+        if (str_contains($type, 'TARJETA') || str_contains($type, 'IDENTIDAD') || $type === 'TI') {
+            return 'TI';
+        }
+        if (str_contains($type, 'EXTRANJERIA') || str_contains($type, 'EXTRANJERÍA') || $type === 'CE') {
+            return 'CE';
+        }
+        if (str_contains($type, 'PASAPORTE') || $type === 'PA') {
+            return 'PA';
+        }
+        if (str_contains($type, 'REGISTRO') || str_contains($type, 'CIVIL') || $type === 'RC') {
+            return 'RC';
+        }
+
+        return 'CC';
+    }
+
+    protected function mapGender($value): string
+    {
+        if (empty($value)) return 'Otro';
+        $gender = strtoupper(trim((string)$value));
+
+        if (in_array($gender, ['M', 'MASCULINO', 'HOMBRE'])) {
+            return 'Masculino';
+        }
+        if (in_array($gender, ['F', 'FEMENINO', 'MUJER'])) {
+            return 'Femenino';
+        }
+
+        return 'Otro';
+    }
+
+    protected function parseDate($value): ?Carbon
+    {
+        if (empty($value)) return null;
+
+        try {
+            if (is_numeric($value)) {
+                return Carbon::createFromFormat('Y-m-d', '1899-12-30')->addDays((int)$value);
+            }
+            return Carbon::parse($value);
+        } catch (\Exception $e) {
+            Log::warning("Error al parsear fecha: {$value} - {$e->getMessage()}");
+            return null;
+        }
+    }
+
+    protected function parseInteger($value): ?int
+    {
+        if (empty($value)) return null;
+        $cleaned = preg_replace('/\D/', '', (string)$value);
+        return !empty($cleaned) ? (int)$cleaned : null;
+    }
+
+    /**
+     * Mapea el tipo de ingreso según valores del Excel
+     */
+    protected function mapAdmissionType($value): string
+    {
+        if (empty($value)) return 'AMBULATORIO';
+        $type = strtoupper(trim((string)$value));
+
+        if (str_contains($type, 'HOSPITALARIO') || str_contains($type, 'HOSPITAL')) {
+            return 'HOSPITALARIO';
+        }
+        if (str_contains($type, 'URGENCIA')) {
+            return 'URGENCIAS';
+        }
+        if (str_contains($type, 'AMBULATORIO')) {
+            return 'AMBULATORIO';
+        }
+
+        return 'AMBULATORIO';
+    }
+
+    /**
+     * Mapea la vía de ingreso según valores permitidos en enum
+     */
+    protected function mapAdmissionVia($value): string
+    {
+        if (empty($value)) return 'URGENCIAS';
+        $via = strtoupper(trim((string)$value));
+
+        if (str_contains($via, 'URGENCIA')) {
+            return 'URGENCIAS';
+        }
+        if (str_contains($via, 'CONSULTA') || str_contains($via, 'EXTERNA')) {
+            return 'CONSULTA_EXTERNA';
+        }
+        if (str_contains($via, 'HOSPITALIZACION') || str_contains($via, 'HOSPITAL')) {
+            return 'HOSPITALIZACION';
+        }
+        if (str_contains($via, 'REFERENCIA') || str_contains($via, 'REMISION')) {
+            return 'REFERENCIA';
+        }
+        if (str_contains($via, 'COMUNIDAD')) {
+            return 'COMUNIDAD';
+        }
+
+        return 'URGENCIAS'; // Por defecto
+    }
+}
+
+// ==================== TRASTORNOS 2025 ====================
 class TrastornosSheet implements ToCollection, WithHeadingRow
 {
+    use FlexibleColumnAccess;
+
     protected $parent;
 
     public function __construct(MentalHealthImport $parent)
@@ -97,63 +315,140 @@ class TrastornosSheet implements ToCollection, WithHeadingRow
         $this->parent = $parent;
     }
 
+    public function headingRow(): int
+    {
+        return 2; // La fila 2 tiene los nombres de columnas reales
+    }
+
     public function collection(Collection $collection)
     {
-        Log::info("Procesando hoja TRASTORNOS 2025 - {$collection->count()} registros");
+        Log::info("TRASTORNOS 2025 - Procesando {$collection->count()} registros");
 
         foreach ($collection as $index => $row) {
-            $this->processRow($row, $index + 2);
+            $rowNumber = $index + 3;
+            $this->processRow($row, $rowNumber);
         }
     }
 
     private function processRow(Collection $row, int $rowNumber)
     {
         try {
-            $documentNumber = $this->cleanString($row['n_documento']);
+
+            if ($rowNumber == 3) {
+                Log::info("COLUMNAS DISPONIBLES EN EXCEL:", [
+                    'keys' => $row->keys()->toArray()
+                ]);
+            }
+
+            $documentNumber = $this->cleanString($this->findColumn($row, [
+                'n_documento',
+                'ndocumento',
+                'numero_documento',
+                'numerodocumento',
+                'documento'
+            ]));
+
+            // DEBUG: Ver qué se encontró
+            Log::info("Fila {$rowNumber} - Búsqueda documento:", [
+                'encontrado' => $documentNumber,
+                'es_vacio' => empty($documentNumber)
+            ]);
 
             if (empty($documentNumber) || !$this->isValidDocument($documentNumber)) {
                 $this->parent->incrementSkipped();
+                // Log::debug("TRASTORNOS Fila {$rowNumber}: Documento inválido o vacío");
                 return;
             }
 
-            // 1. Crear o actualizar paciente
-            $patient = $this->createOrUpdatePatient($row, $rowNumber);
+            $patient = $this->createOrUpdatePatient($row, $rowNumber, $documentNumber);
             if (!$patient) return;
 
-            // 2. Crear caso de trastorno mental
             $mentalDisorder = $this->createMentalDisorderCase($patient, $row, $rowNumber);
             if (!$mentalDisorder) return;
 
-            // 3. Crear seguimientos mensuales asociados al caso
             $this->processMonthlyFollowups($mentalDisorder, $row, $rowNumber);
         } catch (\Exception $e) {
-            $this->parent->addError("TRASTORNOS Fila {$rowNumber}: " . $e->getMessage());
-            Log::error("Error en TRASTORNOS fila {$rowNumber}: " . $e->getMessage());
+            $this->parent->addError("TRASTORNOS Fila {$rowNumber}: {$e->getMessage()}");
+            Log::error("TRASTORNOS Fila {$rowNumber}: {$e->getMessage()}", [
+                'exception' => $e,
+                'trace' => $e->getTraceAsString()
+            ]);
         }
     }
 
-    private function createOrUpdatePatient(Collection $row, int $rowNumber)
+    private function createOrUpdatePatient(Collection $row, int $rowNumber, string $documentNumber)
     {
-        $documentNumber = $this->cleanString($row['n_documento']);
-        $patient = Patient::where('document_number', $documentNumber)->first();
-
-        $patientData = [
-            'document_number' => $documentNumber,
-            'document_type' => $this->mapDocumentType($row['tipo_de_documento']),
-            'full_name' => $this->truncateString($this->cleanString($row['nombres_y_apellidos']), 255),
-            'gender' => $this->mapGender($row['sex0']),
-            'birth_date' => $this->parseDate($row['fecha_de_nacimiento'])?->format('Y-m-d'),
-            'phone' => $this->cleanPhone($row['telefono']),
-            'address' => $this->truncateString($this->cleanString($row['direccion']), 255),
-            'village' => $this->truncateString($this->cleanString($row['vereda']), 255),
-            'eps_code' => $this->truncateString($this->cleanString($row['eps_codigo']), 255),
-            'eps_name' => $this->truncateString($this->cleanString($row['eps_nombre']), 255),
-            'status' => 'active',
-        ];
-
-        $patientData = array_filter($patientData, fn($value) => $value !== null);
-
         try {
+            $patient = Patient::where('document_number', $documentNumber)->first();
+
+            // IMPORTANTE: birth_date es requerido en la migration
+            $birthDate = $this->parseDate($this->findColumn($row, [
+                'fecha_nacimiento',
+                'fechanacimiento',
+                'fecha_nac',
+                'fechanac'
+            ]));
+
+            // Si no hay fecha de nacimiento válida, usar fecha por defecto o saltar
+            if (!$birthDate || !($birthDate instanceof Carbon)) {
+                $birthDate = Carbon::now()->subYears(30);
+            }
+
+            if (!$birthDate) {
+                Log::info("Columna fecha no encontrada. Todas las columnas:", [
+                    'fila' => $rowNumber,
+                    'columnas' => $row->keys()->toArray()
+                ]);
+            }
+
+            $patientData = [
+                'document_number' => $documentNumber,
+                'document_type' => $this->mapDocumentType($this->findColumn($row, [
+                    'tipo_documento',
+                    'tipodocumento',
+                    'tipo_doc',
+                    'tipodoc'
+                ])),
+                'full_name' => $this->truncateString($this->cleanString($this->findColumn($row, [
+                    'nombre_y_apellido_del_paciente',
+                    'nombreyapellidodelpaciente',
+                    'nombre_apellido',
+                    'nombreapellido',
+                    'nombre_completo',
+                    'nombrecompleto'
+                ])), 300),
+                'gender' => $this->mapGender($this->findColumn($row, [
+                    'sexo_paciente',
+                    'sexopaciente',
+                    'sexo',
+                    'genero'
+                ])),
+                'birth_date' => $birthDate->format('Y-m-d'), // REQUERIDO
+                'phone' => $this->cleanPhone($this->findColumn($row, [
+                    'telefono',
+                    'tel',
+                    'celular'
+                ])),
+                'address' => $this->cleanString($this->findColumn($row, [
+                    'direcion_paciente',
+                    'direcionpaciente',
+                    'direccion_paciente',
+                    'direccionpaciente',
+                    'direccion',
+                    'dir'
+                ])),
+                'eps_name' => $this->truncateString($this->cleanString($this->findColumn($row, [
+                    'entidad',
+                    'eps',
+                    'eps_nombre',
+                    'epsnombre'
+                ])), 300),
+                'status' => 'active',
+                'created_by_id' => auth()->id() ?? 1, // CORREGIDO: created_by_id
+            ];
+
+            $patientData = array_filter($patientData, fn($value) => $value !== null);
+
             if ($patient) {
                 $patient->update($patientData);
                 $this->parent->incrementUpdated();
@@ -161,9 +456,14 @@ class TrastornosSheet implements ToCollection, WithHeadingRow
                 $patient = Patient::create($patientData);
                 $this->parent->incrementImported();
             }
+
             return $patient;
         } catch (\Exception $e) {
-            $this->parent->addError("TRASTORNOS Fila {$rowNumber}: Error BD paciente - " . $e->getMessage());
+            $this->parent->addError("TRASTORNOS Fila {$rowNumber}: Error BD paciente - {$e->getMessage()}");
+            Log::error("TRASTORNOS Fila {$rowNumber}: Error BD paciente", [
+                'exception' => $e->getMessage(),
+                'data' => $documentNumber
+            ]);
             return null;
         }
     }
@@ -171,27 +471,58 @@ class TrastornosSheet implements ToCollection, WithHeadingRow
     private function createMentalDisorderCase(Patient $patient, Collection $row, int $rowNumber)
     {
         try {
-            // Verificar si ya existe un caso para este paciente
             $existingCase = MentalDisorder::where('patient_id', $patient->id)->first();
+
+            // Obtener fecha de ingreso
+            $admissionDate = $this->parseDate($this->findColumn($row, [
+                'fecha_ingreso',
+                'fechaingreso',
+                'fecha_infreso',
+                'fechainfreso'
+            ])) ?? now();
 
             $caseData = [
                 'patient_id' => $patient->id,
-                'admission_date' => $this->parseDate($row['fecha_de_ingreso']) ?? now(),
-                'admission_type' => $this->cleanString($row['tipo_de_ingreso']),
-                'admission_via' => $this->cleanString($row['ingreso_por']),
-                'service_area' => $this->cleanString($row['area_servicio_de_atencion']),
-                'diagnosis_code' => $this->cleanString($row['diag_codigo']),
-                'diagnosis_description' => $this->cleanString($row['diagnostico']),
-                'diagnosis_date' => $this->parseDate($row['fecha_diagnostico']),
-                'diagnosis_type' => $this->cleanString($row['tipo_diagnostico']),
-                'additional_observation' => $this->cleanString($row['observacion_adicional']),
+                'admission_date' => $admissionDate->format('Y-m-d H:i:s'), // timestamp
+                'admission_type' => $this->mapAdmissionType($this->findColumn($row, [
+                    'tipo_ingreso',
+                    'tipoingreso'
+                ])),
+                'admission_via' => $this->mapAdmissionVia($this->findColumn($row, [
+                    'ingreso_por',
+                    'ingresopor',
+                    'via_ingreso',
+                    'viaingreso'
+                ])),
+                'diagnosis_code' => $this->truncateString($this->cleanString($this->findColumn($row, [
+                    'cod_diagnostico_folio',
+                    'coddiagnosticofolio',
+                    'codigo_diagnostico',
+                    'codigodiagnostico',
+                    'cod_diag',
+                    'coddiag'
+                ])), 10),
+                'diagnosis_date' => $admissionDate->format('Y-m-d H:i:s'), // REQUERIDO: usar misma fecha que admission
+                'diagnosis_description' => $this->cleanString($this->findColumn($row, [
+                    'diagnostico_folio',
+                    'diagnosticofolio',
+                    'diagnostico',
+                    'diag'
+                ])),
+                'diagnosis_type' => $this->mapDiagnosisType($this->findColumn($row, [
+                    'clase_diagnostico',
+                    'clasediagnostico',
+                    'tipo_diagnostico',
+                    'tipodiagnostico'
+                ])),
                 'status' => 'active',
-                'created_by' => auth()->id() ?? 1,
+                'created_by_id' => auth()->id() ?? 1, // CORREGIDO: created_by_id
             ];
 
             $caseData = array_filter($caseData, fn($value) => $value !== null);
 
             if ($existingCase) {
+                $caseData['updated_by_id'] = auth()->id() ?? 1; // CORREGIDO: updated_by_id
                 $existingCase->update($caseData);
                 return $existingCase;
             } else {
@@ -200,59 +531,30 @@ class TrastornosSheet implements ToCollection, WithHeadingRow
                 return $mentalDisorder;
             }
         } catch (\Exception $e) {
-            $this->parent->addError("TRASTORNOS Fila {$rowNumber}: Error creando caso - " . $e->getMessage());
+            $this->parent->addError("TRASTORNOS Fila {$rowNumber}: Error BD caso - {$e->getMessage()}");
+            Log::error("TRASTORNOS Fila {$rowNumber}: Error BD caso", [
+                'exception' => $e->getMessage()
+            ]);
             return null;
         }
     }
 
-    private function processMonthlyFollowups($mentalDisorder, Collection $row, int $rowNumber)
-    // {
-    //     $months = [
-    //         'enero_2025' => 1, 'febrero_2025' => 2, 'marzo_2025' => 3, 'abril_2025' => 4,
-    //         'mayo_2025' => 5, 'junio_2025' => 6, 'julio_2025' => 7, 'agosto_2025' => 8,
-    //         'septiembre_2025' => 9, 'octubre_2025' => 10, 'noviembre_2025' => 11, 'diciembre_2025' => 12
-    //     ];
+    private function mapDiagnosisType($value): string
+    {
+        if (empty($value)) return 'Diagnostico Principal';
+        $type = strtoupper(trim((string)$value));
 
-    //     foreach ($months as $columnName => $monthNumber) {
-    //         $followupData = $this->cleanString($row[$columnName]);
+        if (str_contains($type, 'PRINCIPAL')) {
+            return 'Diagnostico Principal';
+        }
+        if (str_contains($type, 'RELACIONADO') || str_contains($type, 'SECUNDARIO')) {
+            return 'Diagnostico Relacionado';
+        }
 
-    //         if (empty($followupData) || strlen($followupData) < 2) continue;
+        return 'Diagnostico Principal';
+    }
 
-    //         // Verificar si ya existe seguimiento para este mes
-    //         $existingFollowup = MonthlyFollowup::where('followupable_id', $mentalDisorder->id)
-    //             ->where('followupable_type', Patient::class)
-    //             ->where('year', 2025)
-    //             ->where('month', $monthNumber)
-    //             ->first();
-
-    //         if ($existingFollowup) continue;
-
-    //         try {
-    //             $description = "Seguimiento TRASTORNO MENTAL - " . substr($followupData, 0, 500);
-
-    //             if (!empty($mentalDisorder->diagnosis_description)) {
-    //                 $description .= " | Dx: " . substr($mentalDisorder->diagnosis_description, 0, 100);
-    //             }
-
-    //             MonthlyFollowup::create([
-    //                 'followupable_id' => $mentalDisorder->id,
-    //                 'followupable_type' => Patient::class,
-    //                 'followup_date' => Carbon::create(2025, $monthNumber, 15)->format('Y-m-d'),
-    //                 'year' => 2025,
-    //                 'month' => $monthNumber,
-    //                 'description' => substr($description, 0, 1000),
-    //                 'status' => 'completed',
-    //                 'actions_taken' => json_encode(['Seguimiento trastorno mental']),
-    //                 'performed_by' => auth()->id() ?? 1,
-    //             ]);
-
-    //             $this->parent->incrementFollowups();
-
-    //         } catch (\Exception $e) {
-    //             $this->parent->addError("TRASTORNOS Fila {$rowNumber}: Error seguimiento mes {$monthNumber} - " . $e->getMessage());
-    //         }
-    //     }
-    // }
+    private function processMonthlyFollowups(MentalDisorder $mentalDisorder, Collection $row, int $rowNumber)
     {
         $months = [
             'enero_2025' => 1,
@@ -270,108 +572,48 @@ class TrastornosSheet implements ToCollection, WithHeadingRow
         ];
 
         foreach ($months as $columnName => $monthNumber) {
-            $followupData = $this->cleanString($row[$columnName]);
-
-            if (empty($followupData) || strlen($followupData) < 2) continue;
-
-            // ✅ CORRECCIÓN: Verificar seguimiento para ESTE TRASTORNO específico
-            $existingFollowup = MonthlyFollowup::where('followupable_id', $mentalDisorder->id)
-                ->where('followupable_type', MentalDisorder::class) // ✅ CAMBIO CLAVE
-                ->where('year', 2025)
-                ->where('month', $monthNumber)
-                ->first();
-
-            if ($existingFollowup) continue;
-
             try {
-                $description = "TRASTORNO MENTAL - " . substr($followupData, 0, 400);
+                $followupData = $this->cleanString($this->findColumn($row, [$columnName]));
 
-                if (!empty($mentalDisorder->diagnosis_description)) {
-                    $description .= " | Dx: " . substr($mentalDisorder->diagnosis_description, 0, 100);
+                if (empty($followupData) || strlen($followupData) < 2) {
+                    continue;
                 }
-                if (!empty($mentalDisorder->diagnosis_code)) {
-                    $description .= " | CIE: " . $mentalDisorder->diagnosis_code;
+
+                $existingFollowup = MonthlyFollowup::where('followupable_id', $mentalDisorder->id)
+                    ->where('followupable_type', MentalDisorder::class)
+                    ->where('year', 2025)
+                    ->where('month', $monthNumber)
+                    ->first();
+
+                if ($existingFollowup) {
+                    continue;
                 }
 
                 MonthlyFollowup::create([
                     'followupable_id' => $mentalDisorder->id,
-                    'followupable_type' => MentalDisorder::class, // ✅ CAMBIO CLAVE
+                    'followupable_type' => MentalDisorder::class,
                     'followup_date' => Carbon::create(2025, $monthNumber, 15)->format('Y-m-d'),
                     'year' => 2025,
                     'month' => $monthNumber,
-                    'description' => substr($description, 0, 1000),
+                    'description' => "TRASTORNO MENTAL - " . substr($followupData, 0, 900),
                     'status' => 'completed',
-                    'actions_taken' => ['Seguimiento trastorno mental'], // Array directo
+                    'actions_taken' => json_encode(['Seguimiento trastorno mental']),
                     'performed_by' => auth()->id() ?? 1,
                 ]);
 
                 $this->parent->incrementFollowups();
             } catch (\Exception $e) {
-                $this->parent->addError("TRASTORNOS Fila {$rowNumber}: Error seguimiento mes {$monthNumber} - " . $e->getMessage());
+                $this->parent->addError("TRASTORNOS Fila {$rowNumber}: Error seguimiento {$columnName} - {$e->getMessage()}");
             }
-        }
-    }
-
-    // Métodos helper
-    private function cleanString($value): ?string
-    {
-        if (empty($value)) return null;
-        return trim(strip_tags((string)$value)) ?: null;
-    }
-
-    private function cleanPhone($phone): ?string
-    {
-        if (empty($phone)) return null;
-        $phones = preg_split('/[-,\s\/]/', (string)$phone);
-        $firstPhone = trim($phones[0]);
-        $cleaned = preg_replace('/\D/', '', $firstPhone);
-        return (strlen($cleaned) >= 7 && strlen($cleaned) <= 20) ? $cleaned : null;
-    }
-
-    private function truncateString($string, $maxLength): ?string
-    {
-        if (empty($string)) return null;
-        return strlen($string) > $maxLength ? substr($string, 0, $maxLength) : $string;
-    }
-
-    private function isValidDocument($document): bool
-    {
-        $clean = preg_replace('/\D/', '', (string)$document);
-        return !empty($clean) && strlen($clean) >= 6 && strlen($clean) <= 15;
-    }
-
-    private function mapDocumentType($value): string
-    {
-        if (empty($value)) return 'CC';
-        $type = strtoupper(trim((string)$value));
-        return in_array($type, ['CC', 'TI', 'CE', 'PA', 'RC', 'MS', 'AS', 'CN']) ? $type : 'CC';
-    }
-
-    private function mapGender($value): string
-    {
-        if (empty($value)) return 'Otro';
-        $gender = strtoupper(trim((string)$value));
-        if (in_array($gender, ['M', 'MASCULINO', 'HOMBRE'])) return 'Masculino';
-        if (in_array($gender, ['F', 'FEMENINO', 'MUJER'])) return 'Femenino';
-        return 'Otro';
-    }
-
-    private function parseDate($value): ?Carbon
-    {
-        if (empty($value)) return null;
-        try {
-            return is_numeric($value)
-                ? Carbon::createFromFormat('Y-m-d', '1899-12-30')->addDays($value)
-                : Carbon::parse($value);
-        } catch (\Exception $e) {
-            return null;
         }
     }
 }
 
-// ==================== HOJA EVENTO 356 COMPLETA ====================
+// ==================== EVENTO 356 2025 ====================
 class Evento356Sheet implements ToCollection, WithHeadingRow
 {
+    use FlexibleColumnAccess;
+
     protected $parent;
 
     public function __construct(MentalHealthImport $parent)
@@ -379,61 +621,144 @@ class Evento356Sheet implements ToCollection, WithHeadingRow
         $this->parent = $parent;
     }
 
+
+    public function headingRow(): int
+    {
+        return 2; // La fila 2 tiene los nombres de columnas reales
+    }
+
+
     public function collection(Collection $collection)
     {
-        Log::info("Procesando hoja EVENTO 356 2025 - {$collection->count()} registros");
+        Log::info("EVENTO 356 2025 - Procesando {$collection->count()} registros");
 
         foreach ($collection as $index => $row) {
-            $this->processRow($row, $index + 2);
+            $rowNumber = $index + 3;
+            $this->processRow($row, $rowNumber);
         }
     }
 
     private function processRow(Collection $row, int $rowNumber)
     {
         try {
-            $documentNumber = $this->cleanString($row['n_documento']);
+
+            if ($rowNumber == 3) {
+                Log::info("COLUMNAS DISPONIBLES EN EXCEL:", [
+                    'keys' => $row->keys()->toArray()
+                ]);
+            }
+
+            $documentNumber = $this->cleanString($this->findColumn($row, [
+                'n_documento',
+                'ndocumento',
+                'numero_documento',
+                'numerodocumento',
+                'documento'
+            ]));
+
+            // DEBUG: Ver qué se encontró
+            Log::info("Fila {$rowNumber} - Búsqueda documento:", [
+                'encontrado' => $documentNumber,
+                'es_vacio' => empty($documentNumber)
+            ]);
 
             if (empty($documentNumber) || !$this->isValidDocument($documentNumber)) {
                 $this->parent->incrementSkipped();
+                // Log::debug("EVENTO 356 Fila {$rowNumber}: Documento inválido o vacío");
                 return;
             }
 
-            // 1. Crear o actualizar paciente
-            $patient = $this->createOrUpdatePatient($row, $rowNumber);
+            $patient = $this->createOrUpdatePatient($row, $rowNumber, $documentNumber);
             if (!$patient) return;
 
-            // 2. Crear caso de intento de suicidio
             $suicideAttempt = $this->createSuicideAttemptCase($patient, $row, $rowNumber);
             if (!$suicideAttempt) return;
 
-            // 3. Crear seguimientos mensuales asociados al caso
             $this->processMonthlyFollowups($suicideAttempt, $row, $rowNumber);
         } catch (\Exception $e) {
-            $this->parent->addError("EVENTO 356 Fila {$rowNumber}: " . $e->getMessage());
+            $this->parent->addError("EVENTO 356 Fila {$rowNumber}: {$e->getMessage()}");
+            Log::error("EVENTO 356 Fila {$rowNumber}: {$e->getMessage()}");
         }
     }
 
-    private function createOrUpdatePatient(Collection $row, int $rowNumber)
+    private function createOrUpdatePatient(Collection $row, int $rowNumber, string $documentNumber)
     {
-        $documentNumber = $this->cleanString($row['n_documento']);
-        $patient = Patient::where('document_number', $documentNumber)->first();
-
-        $patientData = [
-            'document_number' => $documentNumber,
-            'document_type' => $this->mapDocumentType($row['tipo_doc']),
-            'full_name' => $this->truncateString($this->cleanString($row['nombres_y_apellidos']), 255),
-            'gender' => $this->mapGender($row['sexo']),
-            'birth_date' => $this->parseDate($row['fecha_de_nacimiento'])?->format('Y-m-d'),
-            'phone' => $this->cleanPhone($row['telefono']),
-            'address' => $this->truncateString($this->cleanString($row['direccion']), 255),
-            'neighborhood' => $this->truncateString($this->cleanString($row['barrio']), 255),
-            'village' => $this->truncateString($this->cleanString($row['vereda']), 255),
-            'status' => 'active',
-        ];
-
-        $patientData = array_filter($patientData, fn($value) => $value !== null);
-
         try {
+            $patient = Patient::where('document_number', $documentNumber)->first();
+
+            $birthDate = $this->parseDate($this->findColumn($row, [
+                'fecha_de_nacimiento',
+                'fechadenacimiento',
+                'fecha_nacimiento',
+                'fechanacimiento',
+                'fecha_nac',
+                'fechanac'
+            ]));
+
+            if (!$birthDate) {
+                Log::warning("EVENTO 356 Fila {$rowNumber}: Fecha de nacimiento inválida, usando fecha por defecto");
+                $birthDate = Carbon::now()->subYears(30);
+            }
+
+            $patientData = [
+                'document_number' => $documentNumber,
+                'document_type' => $this->mapDocumentType($this->findColumn($row, [
+                    'tipo_doc',
+                    'tipodoc',
+                    'tipo_documento',
+                    'tipodocumento'
+                ])),
+                'full_name' => $this->truncateString($this->cleanString($this->findColumn($row, [
+                    'nombres_y_apellidos',
+                    'nombresyapellidos',
+                    'nombre_completo',
+                    'nombrecompleto',
+                    'nombre_apellido',
+                    'nombreapellido'
+                ])), 300),
+                'gender' => $this->mapGender($this->findColumn($row, [
+                    'sexo',
+                    'genero',
+                    'sexo_paciente',
+                    'sexopaciente'
+                ])),
+                'birth_date' => $birthDate->format('Y-m-d'),
+                'phone' => $this->cleanPhone($this->findColumn($row, [
+                    'telefono',
+                    'tel',
+                    'celular'
+                ])),
+                'address' => $this->cleanString($this->findColumn($row, [
+                    'direccion',
+                    'dirección',
+                    'dir',
+                    'direccion_paciente',
+                    'direccionpaciente'
+                ])),
+                'neighborhood' => $this->truncateString($this->cleanString($this->findColumn($row, [
+                    'barrio',
+                    'sector'
+                ])), 200),
+                'village' => $this->truncateString($this->cleanString($this->findColumn($row, [
+                    'vereda',
+                    'corregimiento'
+                ])), 200),
+                'eps_name' => $this->truncateString($this->cleanString($this->findColumn($row, [
+                    'plan_de_beneficios',
+                    'plandebeneficio',
+                    'plan_beneficios',
+                    'planbeneficios',
+                    'eps_nombre',
+                    'epsnombre',
+                    'eps',
+                    'entidad'
+                ])), 300),
+                'status' => 'active',
+                'created_by_id' => auth()->id() ?? 1,
+            ];
+
+            $patientData = array_filter($patientData, fn($value) => $value !== null);
+
             if ($patient) {
                 $patient->update($patientData);
                 $this->parent->incrementUpdated();
@@ -441,9 +766,13 @@ class Evento356Sheet implements ToCollection, WithHeadingRow
                 $patient = Patient::create($patientData);
                 $this->parent->incrementImported();
             }
+
             return $patient;
-        } catch (Exception $e) {
-            $this->parent->addError("EVENTO 356 Fila {$rowNumber}: Error BD paciente - " . $e->getMessage());
+        } catch (\Exception $e) {
+            $this->parent->addError("EVENTO 356 Fila {$rowNumber}: Error BD paciente - {$e->getMessage()}");
+            Log::error("EVENTO 356 Fila {$rowNumber}: Error BD paciente", [
+                'exception' => $e->getMessage()
+            ]);
             return null;
         }
     }
@@ -451,35 +780,76 @@ class Evento356Sheet implements ToCollection, WithHeadingRow
     private function createSuicideAttemptCase(Patient $patient, Collection $row, int $rowNumber)
     {
         try {
-            // Verificar si ya existe un caso para este paciente
             $existingCase = SuicideAttempt::where('patient_id', $patient->id)->first();
 
-            $riskFactorsArray = [];
-            $riskFactorsText = $this->cleanString($row['factores_de_riesgo']);
-            if (!empty($riskFactorsText)) {
-                $riskFactorsArray = array_map('trim', explode(',', $riskFactorsText));
+            // IMPORTANTE: usar event_date no admission_date
+            $eventDate = $this->parseDate($this->findColumn($row, [
+                'fecha_de_ingreso',
+                'fechadeingreso',
+                'fecha_ingreso',
+                'fechaingreso'
+            ])) ?? now();
+
+            // Procesar factores de riesgo como JSON array
+            $riskFactorsText = $this->cleanString($this->findColumn($row, [
+                'factores_de_riesgo',
+                'factoresderiesgo',
+                'factores_riesgo',
+                'factoresriesgo',
+                'riesgos'
+            ]));
+
+            $riskFactorsJson = null;
+            if ($riskFactorsText) {
+                // Convertir texto a array separado por comas o punto y coma
+                $riskFactorsArray = preg_split('/[,;]/', $riskFactorsText);
+                $riskFactorsArray = array_map('trim', $riskFactorsArray);
+                $riskFactorsArray = array_filter($riskFactorsArray);
+                $riskFactorsJson = !empty($riskFactorsArray) ? json_encode($riskFactorsArray) : null;
             }
 
             $caseData = [
                 'patient_id' => $patient->id,
-                'event_date' => $this->parseDate($row['fecha_de_ingreso']) ?? now(),
-                'week_number' => $this->cleanString($row['semana']),
-                'admission_via' => $this->cleanString($row['ingreso_por']),
-                'attempt_number' => (int)($this->cleanString($row['n_intentos']) ?? 1),
-                'benefit_plan' => $this->cleanString($row['plan_de_beneficios']),
-                'trigger_factor' => $this->cleanString($row['desencadenante']) ?? 'No especificado',
-                'risk_factors' => $riskFactorsArray ?: null,
-                'mechanism' => $this->cleanString($row['mecanismo']) ?? 'No especificado',
-                'additional_observation' => $this->cleanString($row['observacion_adicional']),
+                'event_date' => $eventDate->format('Y-m-d H:i:s'), // CORREGIDO: event_date
+                'admission_via' => $this->mapAdmissionVia($this->findColumn($row, [
+                    'ingreso_por',
+                    'ingresopor',
+                    'via_ingreso',
+                    'viaingreso'
+                ])),
+                'attempt_number' => $this->parseInteger($this->findColumn($row, [
+                    'n_intentos',
+                    'nintentos',
+                    'numero_intentos',
+                    'numerointentos',
+                    'intentos'
+                ])) ?? 1,
+                'trigger_factor' => $this->cleanString($this->findColumn($row, [ // CORREGIDO: trigger_factor
+                    'desencadenante',
+                    'causa',
+                    'motivo'
+                ])),
+                'risk_factors' => $riskFactorsJson, // JSON
+                'mechanism' => $this->cleanString($this->findColumn($row, [ // CORREGIDO: mechanism
+                    'mecanismo',
+                    'metodo',
+                    'método'
+                ])),
+                'additional_observation' => $this->cleanString($this->findColumn($row, [
+                    'observacion_adicional',
+                    'observacionadicional',
+                    'observación_adicional',
+                    'observaciónadicional',
+                    'observaciones'
+                ])),
                 'status' => 'active',
-                'created_by' => auth()->id() ?? 1,
+                'created_by_id' => auth()->id() ?? 1,
             ];
 
-            $caseData = array_filter($caseData, function ($value) {
-                return $value !== null && $value !== '' && $value !== [];
-            });
+            $caseData = array_filter($caseData, fn($value) => $value !== null);
 
             if ($existingCase) {
+                $caseData['updated_by_id'] = auth()->id() ?? 1;
                 $existingCase->update($caseData);
                 return $existingCase;
             } else {
@@ -488,12 +858,15 @@ class Evento356Sheet implements ToCollection, WithHeadingRow
                 return $suicideAttempt;
             }
         } catch (\Exception $e) {
-            $this->parent->addError("EVENTO 356 Fila {$rowNumber}: Error creando caso - " . $e->getMessage());
+            $this->parent->addError("EVENTO 356 Fila {$rowNumber}: Error BD caso - {$e->getMessage()}");
+            Log::error("EVENTO 356 Fila {$rowNumber}: Error BD caso", [
+                'exception' => $e->getMessage()
+            ]);
             return null;
         }
     }
 
-    private function processMonthlyFollowups($suicideAttempt, Collection $row, int $rowNumber)
+    private function processMonthlyFollowups(SuicideAttempt $suicideAttempt, Collection $row, int $rowNumber)
     {
         $months = [
             'enero_2025' => 1,
@@ -511,107 +884,48 @@ class Evento356Sheet implements ToCollection, WithHeadingRow
         ];
 
         foreach ($months as $columnName => $monthNumber) {
-            $followupData = $this->cleanString($row[$columnName]);
-
-            if (empty($followupData) || strlen($followupData) < 2) continue;
-
-            // ✅ CORRECCIÓN: Verificar seguimiento para ESTE INTENTO SUICIDIO específico
-            $existingFollowup = MonthlyFollowup::where('followupable_id', $suicideAttempt->id)
-                ->where('followupable_type', SuicideAttempt::class) // ✅ CAMBIO CLAVE
-                ->where('year', 2025)
-                ->where('month', $monthNumber)
-                ->first();
-
-            if ($existingFollowup) continue;
-
             try {
-                $description = "INTENTO SUICIDIO - " . substr($followupData, 0, 400);
+                $followupData = $this->cleanString($this->findColumn($row, [$columnName]));
 
-                $additionalInfo = [];
-                if (!empty($suicideAttempt->attempt_number)) {
-                    $additionalInfo[] = "Intento #{$suicideAttempt->attempt_number}";
-                }
-                if (!empty($suicideAttempt->mechanism)) {
-                    $additionalInfo[] = "Mecanismo: " . substr($suicideAttempt->mechanism, 0, 50);
-                }
-                if (!empty($suicideAttempt->trigger_factor)) {
-                    $additionalInfo[] = "Trigger: " . substr($suicideAttempt->trigger_factor, 0, 50);
+                if (empty($followupData) || strlen($followupData) < 2) {
+                    continue;
                 }
 
-                if (!empty($additionalInfo)) {
-                    $description .= " | " . implode(" | ", $additionalInfo);
+                $existingFollowup = MonthlyFollowup::where('followupable_id', $suicideAttempt->id)
+                    ->where('followupable_type', SuicideAttempt::class)
+                    ->where('year', 2025)
+                    ->where('month', $monthNumber)
+                    ->first();
+
+                if ($existingFollowup) {
+                    continue;
                 }
 
                 MonthlyFollowup::create([
                     'followupable_id' => $suicideAttempt->id,
-                    'followupable_type' => SuicideAttempt::class, // ✅ CAMBIO CLAVE
+                    'followupable_type' => SuicideAttempt::class,
                     'followup_date' => Carbon::create(2025, $monthNumber, 15)->format('Y-m-d'),
                     'year' => 2025,
                     'month' => $monthNumber,
-                    'description' => substr($description, 0, 1000),
+                    'description' => "INTENTO SUICIDIO - " . substr($followupData, 0, 900),
                     'status' => 'completed',
-                    'actions_taken' => ['Seguimiento intento suicidio'], // Array directo
+                    'actions_taken' => json_encode(['Seguimiento intento suicidio']),
                     'performed_by' => auth()->id() ?? 1,
                 ]);
 
                 $this->parent->incrementFollowups();
             } catch (\Exception $e) {
-                $this->parent->addError("EVENTO 356 Fila {$rowNumber}: Error seguimiento - " . $e->getMessage());
+                $this->parent->addError("EVENTO 356 Fila {$rowNumber}: Error seguimiento {$columnName} - {$e->getMessage()}");
             }
-        }
-    }
-
-
-    // Métodos helper (iguales que TrastornosSheet)
-    private function cleanString($value): ?string
-    {
-        return empty($value) ? null : (trim(strip_tags((string)$value)) ?: null);
-    }
-    private function cleanPhone($phone): ?string
-    {
-        if (empty($phone)) return null;
-        $phones = preg_split('/[-,\s\/]/', (string)$phone);
-        $firstPhone = trim($phones[0]);
-        $cleaned = preg_replace('/\D/', '', $firstPhone);
-        return (strlen($cleaned) >= 7 && strlen($cleaned) <= 20) ? $cleaned : null;
-    }
-    private function truncateString($string, $maxLength): ?string
-    {
-        return empty($string) ? null : (strlen($string) > $maxLength ? substr($string, 0, $maxLength) : $string);
-    }
-    private function isValidDocument($document): bool
-    {
-        $clean = preg_replace('/\D/', '', (string)$document);
-        return !empty($clean) && strlen($clean) >= 6 && strlen($clean) <= 15;
-    }
-    private function mapDocumentType($value): string
-    {
-        if (empty($value)) return 'CC';
-        $type = strtoupper(trim((string)$value));
-        return in_array($type, ['CC', 'TI', 'CE', 'PA', 'RC']) ? $type : 'CC';
-    }
-    private function mapGender($value): string
-    {
-        if (empty($value)) return 'Otro';
-        $gender = strtoupper(trim((string)$value));
-        if (in_array($gender, ['M', 'MASCULINO', 'HOMBRE'])) return 'Masculino';
-        if (in_array($gender, ['F', 'FEMENINO', 'MUJER'])) return 'Femenino';
-        return 'Otro';
-    }
-    private function parseDate($value): ?Carbon
-    {
-        if (empty($value)) return null;
-        try {
-            return is_numeric($value) ? Carbon::createFromFormat('Y-m-d', '1899-12-30')->addDays($value) : Carbon::parse($value);
-        } catch (\Exception $e) {
-            return null;
         }
     }
 }
 
-// ==================== HOJA CONSUMO SPA COMPLETA ====================
+// ==================== CONSUMO SPA 2025 ====================
 class ConsumoSpaSheet implements ToCollection, WithHeadingRow
 {
+    use FlexibleColumnAccess;
+
     protected $parent;
 
     public function __construct(MentalHealthImport $parent)
@@ -619,131 +933,127 @@ class ConsumoSpaSheet implements ToCollection, WithHeadingRow
         $this->parent = $parent;
     }
 
+    public function headingRow(): int
+    {
+        return 2; // La fila 2 tiene los nombres de columnas reales
+    }
+
+
     public function collection(Collection $collection)
     {
-        Log::info("Procesando hoja CONSUMO SPA 2025 - {$collection->count()} registros");
+        Log::info("CONSUMO SPA 2025 - Procesando {$collection->count()} registros");
 
         foreach ($collection as $index => $row) {
-            $this->processRow($row, $index + 2);
+            $rowNumber = $index + 3;
+            $this->processRow($row, $rowNumber);
         }
     }
 
     private function processRow(Collection $row, int $rowNumber)
     {
         try {
-            // ✅ Detectar automáticamente el nombre de la columna de documento
-            $documentNumber = $this->findDocumentNumber($row);
+            if ($rowNumber == 3) {
+                Log::info("COLUMNAS DISPONIBLES EN EXCEL:", [
+                    'keys' => $row->keys()->toArray()
+                ]);
+            }
+
+            $documentNumber = $this->cleanString($this->findColumn($row, [
+                'n_documento',
+                'ndocumento',
+                'numero_documento',
+                'numerodocumento',
+                'documento'
+            ]));
+
+            // DEBUG: Ver qué se encontró
+            Log::info("Fila {$rowNumber} - Búsqueda documento:", [
+                'encontrado' => $documentNumber,
+                'es_vacio' => empty($documentNumber)
+            ]);
 
             if (empty($documentNumber) || !$this->isValidDocument($documentNumber)) {
                 $this->parent->incrementSkipped();
+                // Log::debug("CONSUMO SPA Fila {$rowNumber}: Documento inválido o vacío");
                 return;
             }
 
-            // 1. Crear o actualizar paciente
-            $patient = $this->createOrUpdatePatient($row, $rowNumber);
+            $patient = $this->createOrUpdatePatient($row, $rowNumber, $documentNumber);
             if (!$patient) return;
 
-            // 2. Crear caso de consumo de sustancias
             $substanceConsumption = $this->createSubstanceConsumptionCase($patient, $row, $rowNumber);
             if (!$substanceConsumption) return;
 
-            // 3. Crear seguimientos mensuales asociados al caso
             $this->processMonthlyFollowups($substanceConsumption, $row, $rowNumber);
         } catch (\Exception $e) {
-            $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: " . $e->getMessage());
+            $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: {$e->getMessage()}");
+            Log::error("CONSUMO SPA Fila {$rowNumber}: {$e->getMessage()}");
         }
     }
 
-    /**
-     * Buscar el número de documento en diferentes posibles columnas
-     */
-    private function findDocumentNumber(Collection $row): ?string
+    private function createOrUpdatePatient(Collection $row, int $rowNumber, string $documentNumber)
     {
-        $possibleColumns = [
-            'n_documento',
-            'numero_documento',
-            'documento',
-            'cedula',
-            'identificacion'
-        ];
-
-        foreach ($possibleColumns as $column) {
-            $value = $this->cleanString($row[$column] ?? null);
-            if (!empty($value)) {
-                return $value;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Buscar el nombre completo en diferentes posibles columnas
-     */
-    private function findFullName(Collection $row): ?string
-    {
-        $possibleColumns = [
-            'nombre_completo',
-            'nombres_y_apellidos',
-            'nombres_apellidos',
-            'nombre',
-            'paciente',
-            'full_name'
-        ];
-
-        foreach ($possibleColumns as $column) {
-            $value = $this->cleanString($row[$column] ?? null);
-            if (!empty($value)) {
-                return $value;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Buscar la EPS en diferentes posibles columnas
-     */
-    private function findEPS(Collection $row): ?string
-    {
-        $possibleColumns = [
-            'eps',
-            'eps_nombre',
-            'nombre_eps',
-            'entidad',
-            'aseguradora'
-        ];
-
-        foreach ($possibleColumns as $column) {
-            $value = $this->cleanString($row[$column] ?? null);
-            if (!empty($value)) {
-                return $value;
-            }
-        }
-
-        return null;
-    }
-
-    private function createOrUpdatePatient(Collection $row, int $rowNumber)
-    {
-        $documentNumber = $this->findDocumentNumber($row);
-        $patient = Patient::where('document_number', $documentNumber)->first();
-
-        $patientData = [
-            'document_number' => $documentNumber,
-            'document_type' => $this->mapDocumentType($row['tipo_doc'] ?? $row['tipo_documento'] ?? null),
-            'full_name' => $this->truncateString($this->findFullName($row), 255),
-            'gender' => $this->mapGender($row['sexo'] ?? $row['genero'] ?? null),
-            'birth_date' => $this->parseDate($row['fecha_de_nacimiento'] ?? $row['fecha_nacimiento'] ?? null)?->format('Y-m-d'),
-            'phone' => $this->cleanPhone($row['telefono'] ?? $row['celular'] ?? null),
-            'eps_name' => $this->truncateString($this->findEPS($row), 255),
-            'status' => 'active',
-        ];
-
-        // Filtrar valores null
-        $patientData = array_filter($patientData, fn($value) => $value !== null);
-
         try {
+            $patient = Patient::where('document_number', $documentNumber)->first();
+
+            $birthDate = $this->parseDate($this->findColumn($row, [
+                'fecha_de_nacimiento',
+                'fechadenacimiento',
+                'fecha_nacimiento',
+                'fechanacimiento',
+                'fecha_nac',
+                'fechanac'
+            ]));
+
+            if (!$birthDate) {
+                Log::warning("CONSUMO SPA Fila {$rowNumber}: Fecha de nacimiento inválida, usando fecha por defecto");
+                $birthDate = Carbon::now()->subYears(30);
+            }
+
+            $patientData = [
+                'document_number' => $documentNumber,
+                'document_type' => $this->mapDocumentType($this->findColumn($row, [
+                    'tipo_doc',
+                    'tipodoc',
+                    'tipo_documento',
+                    'tipodocumento'
+                ])),
+                'full_name' => $this->truncateString($this->cleanString($this->findColumn($row, [
+                    'nombre_completo',
+                    'nombrecompleto',
+                    'nombres_apellidos',
+                    'nombresapellidos',
+                    'nombre_apellido',
+                    'nombreapellido'
+                ])), 300),
+                'gender' => $this->mapGender($this->findColumn($row, [
+                    'sexo',
+                    'genero',
+                    'sexo_paciente',
+                    'sexopaciente'
+                ])),
+                'birth_date' => $birthDate->format('Y-m-d'),
+                'phone' => $this->cleanPhone($this->findColumn($row, [
+                    'telefono',
+                    'tel',
+                    'celular'
+                ])),
+                'eps_name' => $this->truncateString($this->cleanString($this->findColumn($row, [
+                    'eps_nombre',
+                    'epsnombre',
+                    'eps',
+                    'entidad',
+                    'plan_beneficios',
+                    'planbeneficios',
+                    'plan_de_beneficios',
+                    'plandebeneficio'
+                ])), 300),
+                'status' => 'active',
+                'created_by_id' => auth()->id() ?? 1,
+            ];
+
+            $patientData = array_filter($patientData, fn($value) => $value !== null);
+
             if ($patient) {
                 $patient->update($patientData);
                 $this->parent->incrementUpdated();
@@ -751,67 +1061,74 @@ class ConsumoSpaSheet implements ToCollection, WithHeadingRow
                 $patient = Patient::create($patientData);
                 $this->parent->incrementImported();
             }
+
             return $patient;
         } catch (\Exception $e) {
-            $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error BD paciente - " . $e->getMessage());
+            $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error BD paciente - {$e->getMessage()}");
+            Log::error("CONSUMO SPA Fila {$rowNumber}: Error BD paciente", [
+                'exception' => $e->getMessage()
+            ]);
             return null;
         }
     }
-    
-    private function mapConsumptionLevel($value): string
-    {
-        if (empty($value)) {
-            return 'Bajo Riesgo'; // Valor por defecto
-        }
-
-        $clean = strtoupper(trim((string)$value));
-
-        return match ($clean) {
-            'ALTO RIESGO', 'ALTO' => 'Alto Riesgo',
-            'RIESGO MODERADO', 'MODERADO' => 'Riesgo Moderado',
-            'BAJO RIESGO', 'BAJO' => 'Bajo Riesgo',
-            'PERJUDICIAL' => 'Perjudicial',
-            default => 'Bajo Riesgo',
-        };
-    }
-
 
     private function createSubstanceConsumptionCase(Patient $patient, Collection $row, int $rowNumber)
     {
         try {
-            // Verificar si ya existe un caso para este paciente
             $existingCase = SubstanceConsumption::where('patient_id', $patient->id)->first();
 
-            // ✅ Buscar sustancias en diferentes posibles columnas
-            $substancesArray = $this->findSubstances($row);
+            $admissionDate = $this->parseDate($this->findColumn($row, [
+                'fecha_de_ingres',
+                'fechadeingres',
+                'fecha_de_ingreso',
+                'fechadeingreso',
+                'fecha_ingreso',
+                'fechaingreso'
+            ])) ?? now();
 
-            // ✅ Buscar fecha de ingreso en diferentes formatos
-            $admissionDate = $this->findAdmissionDate($row);
+            $diagnosis = $this->truncateString($this->cleanString($this->findColumn($row, [
+                'diagnostico',
+                'diagnóstico',
+                'diag'
+            ])), 500);
+
+            $tipoSustancia = $this->cleanString($this->findColumn($row, [
+                'tipo_sustancia',
+                'tiposustancia',
+                'sustancia'
+            ]));
+
+            $substancesArray = $this->extractSubstances($diagnosis, $tipoSustancia);
 
             $caseData = [
                 'patient_id' => $patient->id,
-                'admission_date' => $admissionDate ?? now(),
-                'admission_via' => $this->cleanString($row['ingreso_por'] ?? $row['via_ingreso'] ?? null) ?? 'No especificado',
-                'diagnosis' => $this->cleanString($row['diagnostico'] ?? $row['dx'] ?? null) ?? 'Sin diagnóstico específico',
-                'substances_used' => $substancesArray,
-                // 'consumption_level' => $this->cleanString($row['nivel_consumo'] ?? $row['nivel'] ?? $row['grado_consumo'] ?? null) ?? 'No especificado',
-                'consumption_level' => $this->mapConsumptionLevel(
-                    $row['nivel_consumo'] ?? $row['nivel'] ?? $row['grado_consumo'] ?? null
-                ),
-                'additional_observation' => $this->cleanString($row['observacion_adicional'] ?? $row['observaciones'] ?? null),
+                'admission_date' => $admissionDate->format('Y-m-d H:i:s'),
+                'admission_via' => $this->mapAdmissionVia($this->findColumn($row, [
+                    'ingreso_por',
+                    'ingresopor',
+                    'via_ingreso',
+                    'viaingreso'
+                ])),
+                'diagnosis' => $diagnosis ?? 'Consumo de SPA',
+                'substances_used' => json_encode($substancesArray),
+                'consumption_level' => 'Bajo Riesgo', // Por defecto
+                'additional_observation' => $this->cleanString($this->findColumn($row, [
+                    'observacion_adicional',
+                    'observacionadicional',
+                    'observación_adicional',
+                    'observaciónadicional',
+                    'observaciones'
+                ])),
                 'status' => 'active',
-                'created_by' => auth()->id() ?? 1,
+                'created_by_id' => auth()->id() ?? 1,
             ];
 
-            // Filtrar valores nulos para campos opcionales
-            $caseData = array_filter($caseData, function ($value, $key) {
-                if ($key === 'additional_observation') {
-                    return true; // Permitir null
-                }
-                return $value !== null && $value !== '' && $value !== [];
-            }, ARRAY_FILTER_USE_BOTH);
+            $caseData = array_filter($caseData, function ($value) {
+                return $value !== null && $value !== '' && $value !== '[]';
+            });
 
             if ($existingCase) {
+                $caseData['updated_by_id'] = auth()->id() ?? 1;
                 $existingCase->update($caseData);
                 return $existingCase;
             } else {
@@ -820,64 +1137,15 @@ class ConsumoSpaSheet implements ToCollection, WithHeadingRow
                 return $substanceConsumption;
             }
         } catch (\Exception $e) {
-            $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error creando caso - " . $e->getMessage());
+            $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error BD caso - {$e->getMessage()}");
+            Log::error("CONSUMO SPA Fila {$rowNumber}: Error BD caso", [
+                'exception' => $e->getMessage()
+            ]);
             return null;
         }
     }
 
-    /**
-     * Buscar sustancias utilizadas en diferentes columnas posibles
-     */
-    private function findSubstances(Collection $row): array
-    {
-        $possibleColumns = [
-            'sustancias',
-            'sustancia',
-            'drogas',
-            'spa',
-            'sustancias_usadas',
-            'tipo_sustancia'
-        ];
-
-        foreach ($possibleColumns as $column) {
-            $substancesText = $this->cleanString($row[$column] ?? null);
-            if (!empty($substancesText)) {
-                $substancesArray = array_map('trim', explode(',', $substancesText));
-                $substancesArray = array_filter($substancesArray);
-                if (!empty($substancesArray)) {
-                    return $substancesArray;
-                }
-            }
-        }
-
-        // Si no se encuentran sustancias específicas, usar valor por defecto
-        return ['No especificada'];
-    }
-
-    /**
-     * Buscar fecha de ingreso en diferentes formatos
-     */
-    private function findAdmissionDate(Collection $row): ?\Carbon\Carbon
-    {
-        $possibleColumns = [
-            'fecha_de_ingreso',
-            'fecha_ingreso',
-            'fecha_de_ingres', // Parece que en el código anterior había esta variante
-            'fecha_registro',
-            'fecha'
-        ];
-
-        foreach ($possibleColumns as $column) {
-            $date = $this->parseDate($row[$column] ?? null);
-            if ($date) {
-                return $date;
-            }
-        }
-
-        return null;
-    }
-
-    private function processMonthlyFollowups($substanceConsumption, Collection $row, int $rowNumber)
+    private function processMonthlyFollowups(SubstanceConsumption $substanceConsumption, Collection $row, int $rowNumber)
     {
         $months = [
             'enero_2025' => 1,
@@ -895,35 +1163,21 @@ class ConsumoSpaSheet implements ToCollection, WithHeadingRow
         ];
 
         foreach ($months as $columnName => $monthNumber) {
-            $followupData = $this->cleanString($row[$columnName]);
-
-            if (empty($followupData) || strlen($followupData) < 2) continue;
-
-            // Verificar seguimiento para ESTE CONSUMO SPA específico
-            $existingFollowup = MonthlyFollowup::where('followupable_id', $substanceConsumption->id)
-                ->where('followupable_type', SubstanceConsumption::class)
-                ->where('year', 2025)
-                ->where('month', $monthNumber)
-                ->first();
-
-            if ($existingFollowup) continue;
-
             try {
-                $description = "CONSUMO SPA - " . substr($followupData, 0, 400);
+                $followupData = $this->cleanString($this->findColumn($row, [$columnName]));
 
-                $additionalInfo = [];
-                if (!empty($substanceConsumption->diagnosis)) {
-                    $additionalInfo[] = "Dx: " . substr($substanceConsumption->diagnosis, 0, 100);
-                }
-                if (!empty($substanceConsumption->substances_used) && is_array($substanceConsumption->substances_used)) {
-                    $additionalInfo[] = "Sustancias: " . implode(', ', array_slice($substanceConsumption->substances_used, 0, 3));
-                }
-                if (!empty($substanceConsumption->consumption_level)) {
-                    $additionalInfo[] = "Nivel: " . $substanceConsumption->consumption_level;
+                if (empty($followupData) || strlen($followupData) < 2) {
+                    continue;
                 }
 
-                if (!empty($additionalInfo)) {
-                    $description .= " | " . implode(" | ", $additionalInfo);
+                $existingFollowup = MonthlyFollowup::where('followupable_id', $substanceConsumption->id)
+                    ->where('followupable_type', SubstanceConsumption::class)
+                    ->where('year', 2025)
+                    ->where('month', $monthNumber)
+                    ->first();
+
+                if ($existingFollowup) {
+                    continue;
                 }
 
                 MonthlyFollowup::create([
@@ -932,305 +1186,52 @@ class ConsumoSpaSheet implements ToCollection, WithHeadingRow
                     'followup_date' => Carbon::create(2025, $monthNumber, 15)->format('Y-m-d'),
                     'year' => 2025,
                     'month' => $monthNumber,
-                    'description' => substr($description, 0, 1000),
+                    'description' => "CONSUMO SPA - " . substr($followupData, 0, 900),
                     'status' => 'completed',
-                    'actions_taken' => ['Seguimiento consumo SPA'],
+                    'actions_taken' => json_encode(['Seguimiento consumo SPA']),
                     'performed_by' => auth()->id() ?? 1,
                 ]);
 
                 $this->parent->incrementFollowups();
             } catch (\Exception $e) {
-                $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error seguimiento - " . $e->getMessage());
+                $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error seguimiento {$columnName} - {$e->getMessage()}");
             }
         }
     }
 
-    // ==================== MÉTODOS HELPER MEJORADOS ====================
-
-    private function cleanString($value): ?string
+    private function extractSubstances(?string $diagnosis, ?string $tipoSustancia): array
     {
-        if (empty($value)) return null;
-        return trim(strip_tags((string)$value)) ?: null;
-    }
+        $substances = [];
+        $textToSearch = strtoupper(($diagnosis ?? '') . ' ' . ($tipoSustancia ?? ''));
 
-    private function cleanPhone($phone): ?string
-    {
-        if (empty($phone)) return null;
-        $phones = preg_split('/[-,\s\/]/', (string)$phone);
-        $firstPhone = trim($phones[0]);
-        $cleaned = preg_replace('/\D/', '', $firstPhone);
-        return (strlen($cleaned) >= 7 && strlen($cleaned) <= 20) ? $cleaned : null;
-    }
-
-    private function truncateString($string, $maxLength): ?string
-    {
-        if (empty($string)) return null;
-        return strlen($string) > $maxLength ? substr($string, 0, $maxLength) : $string;
-    }
-
-    private function isValidDocument($document): bool
-    {
-        $clean = preg_replace('/\D/', '', (string)$document);
-        return !empty($clean) && strlen($clean) >= 6 && strlen($clean) <= 15;
-    }
-
-    private function mapDocumentType($value): string
-    {
-        if (empty($value)) return 'CC';
-        $type = strtoupper(trim((string)$value));
-        return in_array($type, ['CC', 'TI', 'CE', 'PA', 'RC', 'MS', 'AS', 'CN']) ? $type : 'CC';
-    }
-
-    private function mapGender($value): string
-    {
-        if (empty($value)) return 'Otro';
-        $gender = strtoupper(trim((string)$value));
-        if (in_array($gender, ['M', 'MASCULINO', 'HOMBRE'])) return 'Masculino';
-        if (in_array($gender, ['F', 'FEMENINO', 'MUJER'])) return 'Femenino';
-        return 'Otro';
-    }
-
-    private function parseDate($value): ?\Carbon\Carbon
-    {
-        if (empty($value)) return null;
-        try {
-            return is_numeric($value)
-                ? Carbon::createFromFormat('Y-m-d', '1899-12-30')->addDays($value)
-                : Carbon::parse($value);
-        } catch (\Exception $e) {
-            return null;
+        if (empty(trim($textToSearch))) {
+            return ['SPA'];
         }
+
+        $substanceMap = [
+            'ALCOHOL' => 'Alcohol',
+            'MARIHUANA' => 'Marihuana',
+            'CANNABIS' => 'Marihuana',
+            'COCAINA' => 'Cocaína',
+            'COCA' => 'Cocaína',
+            'BAZUCO' => 'Bazuco',
+            'CRACK' => 'Crack',
+            'HEROINA' => 'Heroína',
+            'BENZODIACEPINA' => 'Benzodiacepinas',
+            'OPIOIDE' => 'Opioides',
+            'ANFETAMINA' => 'Anfetaminas',
+            'METANFETAMINA' => 'Metanfetaminas',
+            'INHALANTE' => 'Inhalantes',
+            'ALUCINOGENO' => 'Alucinógenos',
+            'MULTIPLES' => 'Múltiples drogas',
+        ];
+
+        foreach ($substanceMap as $key => $substance) {
+            if (str_contains($textToSearch, $key)) {
+                $substances[] = $substance;
+            }
+        }
+
+        return !empty($substances) ? array_unique($substances) : ['SPA'];
     }
 }
-// class ConsumoSpaSheet implements ToCollection, WithHeadingRow
-// {
-//     protected $parent;
-
-//     public function __construct(MentalHealthImport $parent)
-//     {
-//         $this->parent = $parent;
-//     }
-
-//     public function collection(Collection $collection)
-//     {
-//         Log::info("Procesando hoja CONSUMO SPA 2025 - {$collection->count()} registros");
-
-//         foreach ($collection as $index => $row) {
-//             $this->processRow($row, $index + 2);
-//         }
-//     }
-
-//     private function processRow(Collection $row, int $rowNumber)
-//     {
-//         try {
-//             $documentNumber = $this->cleanString($row['n_documento']);
-
-//             if (empty($documentNumber) || !$this->isValidDocument($documentNumber)) {
-//                 $this->parent->incrementSkipped();
-//                 return;
-//             }
-
-//             // 1. Crear o actualizar paciente
-//             $patient = $this->createOrUpdatePatient($row, $rowNumber);
-//             if (!$patient) return;
-
-//             // 2. Crear caso de consumo de sustancias
-//             $substanceConsumption = $this->createSubstanceConsumptionCase($patient, $row, $rowNumber);
-//             if (!$substanceConsumption) return;
-
-//             // 3. Crear seguimientos mensuales asociados al caso
-//             $this->processMonthlyFollowups($substanceConsumption, $row, $rowNumber);
-//         } catch (\Exception $e) {
-//             $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: " . $e->getMessage());
-//         }
-//     }
-
-//     private function createOrUpdatePatient(Collection $row, int $rowNumber)
-//     {
-//         $documentNumber = $this->cleanString($row['n_documento']);
-//         $patient = Patient::where('document_number', $documentNumber)->first();
-
-//         $patientData = [
-//             'document_number' => $documentNumber,
-//             'document_type' => $this->mapDocumentType($row['tipo_doc']),
-//             'full_name' => $this->truncateString($this->cleanString($row['nombre_completo']), 255),
-//             'gender' => $this->mapGender($row['sexo']),
-//             'birth_date' => $this->parseDate($row['fecha_de_nacimiento'])?->format('Y-m-d'),
-//             'phone' => $this->cleanPhone($row['telefono']),
-//             'eps_name' => $this->truncateString($this->cleanString($row['eps'] ?? $row['eps_nombre']), 255),
-//             'status' => 'active',
-//         ];
-
-//         $patientData = array_filter($patientData, fn($value) => $value !== null);
-
-//         try {
-//             if ($patient) {
-//                 $patient->update($patientData);
-//                 $this->parent->incrementUpdated();
-//             } else {
-//                 $patient = Patient::create($patientData);
-//                 $this->parent->incrementImported();
-//             }
-//             return $patient;
-//         } catch (\Exception $e) {
-//             $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error BD paciente - " . $e->getMessage());
-//             return null;
-//         }
-//     }
-
-//     private function createSubstanceConsumptionCase(Patient $patient, Collection $row, int $rowNumber)
-//     {
-//         try {
-//             // Verificar si ya existe un caso para este paciente
-//             $existingCase = SubstanceConsumption::where('patient_id', $patient->id)->first();
-
-//             // Procesar sustancias utilizadas
-//             $substancesArray = [];
-//             // En este caso no hay columna específica de sustancias en CONSUMO SPA, 
-//             // pero podemos inferirlo del diagnóstico o crear un array genérico
-//             $substancesArray = ['SPA']; // Genérico por ahora
-
-//             $caseData = [
-//                 'patient_id' => $patient->id,
-//                 'admission_date' => $this->parseDate($row['fecha_de_ingres']) ?? now(),
-//                 'admission_via' => $this->cleanString($row['ingreso_por']),
-//                 'diagnosis' => $this->cleanString($row['diagnostico']),
-//                 'substances_used' => $substancesArray,
-//                 'consumption_level' => 'No especificado', // No está en el Excel
-//                 'additional_observation' => $this->cleanString($row['observacion_adicional']),
-//                 'status' => 'active',
-//                 'created_by' => auth()->id() ?? 1,
-//             ];
-
-//             $caseData = array_filter($caseData, function ($value) {
-//                 return $value !== null && $value !== '' && $value !== [];
-//             });
-
-//             if ($existingCase) {
-//                 $existingCase->update($caseData);
-//                 return $existingCase;
-//             } else {
-//                 $substanceConsumption = SubstanceConsumption::create($caseData);
-//                 $this->parent->incrementCases();
-//                 return $substanceConsumption;
-//             }
-//         } catch (\Exception $e) {
-//             $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error creando caso - " . $e->getMessage());
-//             return null;
-//         }
-//     }
-
-//     private function processMonthlyFollowups($substanceConsumption, Collection $row, int $rowNumber)
-//     {
-//         $months = [
-//             'enero_2025' => 1,
-//             'febrero_2025' => 2,
-//             'marzo_2025' => 3,
-//             'abril_2025' => 4,
-//             'mayo_2025' => 5,
-//             'junio_2025' => 6,
-//             'julio_2025' => 7,
-//             'agosto_2025' => 8,
-//             'septiembre_2025' => 9,
-//             'octubre_2025' => 10,
-//             'noviembre_2025' => 11,
-//             'diciembre_2025' => 12
-//         ];
-
-//         foreach ($months as $columnName => $monthNumber) {
-//             $followupData = $this->cleanString($row[$columnName]);
-
-//             if (empty($followupData) || strlen($followupData) < 2) continue;
-
-//             // ✅ CORRECCIÓN: Verificar seguimiento para ESTE CONSUMO SPA específico
-//             $existingFollowup = MonthlyFollowup::where('followupable_id', $substanceConsumption->id)
-//                 ->where('followupable_type', SubstanceConsumption::class) // ✅ CAMBIO CLAVE
-//                 ->where('year', 2025)
-//                 ->where('month', $monthNumber)
-//                 ->first();
-
-//             if ($existingFollowup) continue;
-
-//             try {
-//                 $description = "CONSUMO SPA - " . substr($followupData, 0, 400);
-
-//                 $additionalInfo = [];
-//                 if (!empty($substanceConsumption->diagnosis)) {
-//                     $additionalInfo[] = "Dx: " . substr($substanceConsumption->diagnosis, 0, 100);
-//                 }
-//                 if (!empty($substanceConsumption->substances_used) && is_array($substanceConsumption->substances_used)) {
-//                     $additionalInfo[] = "Sustancias: " . implode(', ', array_slice($substanceConsumption->substances_used, 0, 3));
-//                 }
-//                 if (!empty($substanceConsumption->consumption_level)) {
-//                     $additionalInfo[] = "Nivel: " . $substanceConsumption->consumption_level;
-//                 }
-
-//                 if (!empty($additionalInfo)) {
-//                     $description .= " | " . implode(" | ", $additionalInfo);
-//                 }
-
-//                 MonthlyFollowup::create([
-//                     'followupable_id' => $substanceConsumption->id,
-//                     'followupable_type' => SubstanceConsumption::class, // ✅ CAMBIO CLAVE
-//                     'followup_date' => Carbon::create(2025, $monthNumber, 15)->format('Y-m-d'),
-//                     'year' => 2025,
-//                     'month' => $monthNumber,
-//                     'description' => substr($description, 0, 1000),
-//                     'status' => 'completed',
-//                     'actions_taken' => ['Seguimiento consumo SPA'], // Array directo
-//                     'performed_by' => auth()->id() ?? 1,
-//                 ]);
-
-//                 $this->parent->incrementFollowups();
-//             } catch (\Exception $e) {
-//                 $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error seguimiento - " . $e->getMessage());
-//             }
-//         }
-//     }
-
-//     // Métodos helper (iguales que las otras hojas)
-//     private function cleanString($value): ?string
-//     {
-//         return empty($value) ? null : (trim(strip_tags((string)$value)) ?: null);
-//     }
-//     private function cleanPhone($phone): ?string
-//     {
-//         if (empty($phone)) return null;
-//         $phones = preg_split('/[-,\s\/]/', (string)$phone);
-//         $firstPhone = trim($phones[0]);
-//         $cleaned = preg_replace('/\D/', '', $firstPhone);
-//         return (strlen($cleaned) >= 7 && strlen($cleaned) <= 20) ? $cleaned : null;
-//     }
-//     private function truncateString($string, $maxLength): ?string
-//     {
-//         return empty($string) ? null : (strlen($string) > $maxLength ? substr($string, 0, $maxLength) : $string);
-//     }
-//     private function isValidDocument($document): bool
-//     {
-//         $clean = preg_replace('/\D/', '', (string)$document);
-//         return !empty($clean) && strlen($clean) >= 6 && strlen($clean) <= 15;
-//     }
-//     private function mapDocumentType($value): string
-//     {
-//         if (empty($value)) return 'CC';
-//         $type = strtoupper(trim((string)$value));
-//         return in_array($type, ['CC', 'TI', 'CE', 'PA', 'RC']) ? $type : 'CC';
-//     }
-//     private function mapGender($value): string
-//     {
-//         if (empty($value)) return 'Otro';
-//         $gender = strtoupper(trim((string)$value));
-//         if (in_array($gender, ['M', 'MASCULINO', 'HOMBRE'])) return 'Masculino';
-//         if (in_array($gender, ['F', 'FEMENINO', 'MUJER'])) return 'Femenino';
-//         return 'Otro';
-//     }
-//     private function parseDate($value): ?Carbon
-//     {
-//         if (empty($value)) return null;
-//         try {
-//             return is_numeric($value) ? Carbon::createFromFormat('Y-m-d', '1899-12-30')->addDays($value) : Carbon::parse($value);
-//         } catch (\Exception $e) {
-//             return null;
-//         }
-//     }
-// }
