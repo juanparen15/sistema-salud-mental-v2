@@ -4,6 +4,8 @@ namespace App\Providers\Filament;
 
 use Filament\Http\Middleware\Authenticate;
 use BezhanSalleh\FilamentShield\FilamentShieldPlugin;
+use Cmsmaxinc\FilamentErrorPages\FilamentErrorPagesPlugin;
+use JeffersonGoncalves\Filament\WhatsappWidget\WhatsappWidgetPlugin;
 use Filament\Http\Middleware\AuthenticateSession;
 use Filament\Http\Middleware\DisableBladeIconComponents;
 use Filament\Http\Middleware\DispatchServingFilamentEvent;
@@ -43,6 +45,12 @@ class AdminPanelProvider extends PanelProvider
             ->pages([
                 Pages\Dashboard::class,
             ])
+            ->userMenuItems([
+                'cambiar-password' => \Filament\Navigation\MenuItem::make()
+                    ->label('Cambiar Contraseña')
+                    ->url(fn() => \App\Filament\Pages\CambiarPassword::getUrl())
+                    ->icon('heroicon-o-key'),
+            ])
             ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\\Filament\\Widgets')
             ->widgets([
                 // Widgets\AccountWidget::class,
@@ -61,6 +69,8 @@ class AdminPanelProvider extends PanelProvider
             ])
             ->plugins([
                 FilamentShieldPlugin::make(),
+                WhatsappWidgetPlugin::make(),
+                FilamentErrorPagesPlugin::make(),
             ])
             ->authMiddleware([
                 Authenticate::class,
