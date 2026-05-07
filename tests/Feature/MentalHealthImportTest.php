@@ -3,7 +3,6 @@
 namespace Tests\Feature;
 
 use App\Imports\MentalHealthImport;
-use App\Imports\TrastornosSheet;
 use App\Models\MentalDisorder;
 use App\Models\MonthlyFollowup;
 use App\Models\User;
@@ -33,9 +32,10 @@ class MentalHealthImportTest extends TestCase
         ], $overrides));
     }
 
-    private function getSheet(): TrastornosSheet
+    private function getSheet()
     {
-        return new TrastornosSheet(new MentalHealthImport());
+        $parent = new MentalHealthImport(); // loads app/Imports/MentalHealthImport.php, which defines TrastornosSheet
+        return new \App\Imports\TrastornosSheet($parent);
     }
 
     public function test_single_seguimiento_creates_followup_for_admission_month(): void
