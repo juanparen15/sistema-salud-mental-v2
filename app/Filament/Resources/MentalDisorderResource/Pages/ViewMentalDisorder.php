@@ -109,6 +109,17 @@ class ViewMentalDisorder extends ViewRecord
                     ])
                     ->collapsible(),
 
+                Infolists\Components\Section::make('Historial del Paciente')
+                    ->description('Todos los diagnósticos registrados para este paciente, con sus seguimientos')
+                    ->schema([
+                        Infolists\Components\ViewEntry::make('patient_history')
+                            ->label('')
+                            ->view('filament.infolists.patient-history')
+                            ->columnSpanFull(),
+                    ])
+                    ->collapsible()
+                    ->collapsed(),
+
                 Infolists\Components\Section::make('Información de Registro')
                     ->schema([
                         Infolists\Components\TextEntry::make('created_at')

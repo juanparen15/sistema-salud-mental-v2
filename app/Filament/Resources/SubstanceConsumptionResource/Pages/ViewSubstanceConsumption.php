@@ -110,6 +110,17 @@ class ViewSubstanceConsumption extends ViewRecord
                     ])
                     ->collapsible(),
 
+                Infolists\Components\Section::make('Historial del Paciente')
+                    ->description('Todos los registros de consumo SPA para este paciente')
+                    ->schema([
+                        Infolists\Components\ViewEntry::make('patient_substance_history')
+                            ->label('')
+                            ->view('filament.infolists.patient-substance-history')
+                            ->columnSpanFull(),
+                    ])
+                    ->collapsible()
+                    ->collapsed(),
+
                 Infolists\Components\Section::make('Información de Registro')
                     ->schema([
                         Infolists\Components\TextEntry::make('created_at')

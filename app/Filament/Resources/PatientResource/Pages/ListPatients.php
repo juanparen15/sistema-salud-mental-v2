@@ -286,8 +286,9 @@ class ListPatients extends ListRecords
                                     <li><strong>CONSUMO SPA 2025:</strong> Consumo de sustancias</li>
                                 </ul>
                                 <p class="mt-3 p-2 bg-blue-50 rounded text-blue-700">
-                                    <strong>Tip:</strong> Cada hoja debe tener columnas de meses (enero_2025, febrero_2025, etc.) 
-                                    para generar seguimientos automáticos.
+                                    <strong>Tip:</strong> Cada hoja debe tener <strong>una sola columna "seguimiento"</strong>
+                                    con el dato del mes. El sistema asigna el mes automáticamente según la fecha de ingreso.
+                                    Ya no se usan columnas mensuales (enero_2025, febrero_2025, etc.).
                                 </p>
                             </div>
                         '))
