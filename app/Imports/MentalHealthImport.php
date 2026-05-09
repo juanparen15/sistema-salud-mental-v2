@@ -471,9 +471,6 @@ class TrastornosSheet implements ToCollection, WithHeadingRow
     private function createMentalDisorderCase(Patient $patient, Collection $row, int $rowNumber)
     {
         try {
-            $existingCase = MentalDisorder::where('patient_id', $patient->id)->first();
-
-            // Obtener fecha de ingreso
             $admissionDate = $this->parseDate($this->findColumn($row, [
                 'fecha_ingreso',
                 'fechaingreso',
@@ -481,48 +478,56 @@ class TrastornosSheet implements ToCollection, WithHeadingRow
                 'fechainfreso'
             ])) ?? now();
 
+            $diagnosisCode = $this->truncateString($this->cleanString($this->findColumn($row, [
+                'cod_diagnostico_folio',
+                'coddiagnosticofolio',
+                'codigo_diagnostico',
+                'codigodiagnostico',
+                'cod_diag',
+                'coddiag'
+            ])), 10);
+
+            // Detectar duplicados: misma fecha + mismo código diagnóstico = mismo caso
+            $existingCase = MentalDisorder::where('patient_id', $patient->id)
+                ->whereDate('admission_date', $admissionDate->toDateString())
+                ->where('diagnosis_code', $diagnosisCode)
+                ->first();
+
             $caseData = [
-                'patient_id' => $patient->id,
-                'admission_date' => $admissionDate->format('Y-m-d H:i:s'), // timestamp
-                'admission_type' => $this->mapAdmissionType($this->findColumn($row, [
+                'patient_id'            => $patient->id,
+                'admission_date'        => $admissionDate->format('Y-m-d H:i:s'),
+                'admission_type'        => $this->mapAdmissionType($this->findColumn($row, [
                     'tipo_ingreso',
                     'tipoingreso'
                 ])),
-                'admission_via' => $this->mapAdmissionVia($this->findColumn($row, [
+                'admission_via'         => $this->mapAdmissionVia($this->findColumn($row, [
                     'ingreso_por',
                     'ingresopor',
                     'via_ingreso',
                     'viaingreso'
                 ])),
-                'diagnosis_code' => $this->truncateString($this->cleanString($this->findColumn($row, [
-                    'cod_diagnostico_folio',
-                    'coddiagnosticofolio',
-                    'codigo_diagnostico',
-                    'codigodiagnostico',
-                    'cod_diag',
-                    'coddiag'
-                ])), 10),
-                'diagnosis_date' => $admissionDate->format('Y-m-d H:i:s'), // REQUERIDO: usar misma fecha que admission
+                'diagnosis_code'        => $diagnosisCode,
+                'diagnosis_date'        => $admissionDate->format('Y-m-d H:i:s'),
                 'diagnosis_description' => $this->cleanString($this->findColumn($row, [
                     'diagnostico_folio',
                     'diagnosticofolio',
                     'diagnostico',
                     'diag'
                 ])),
-                'diagnosis_type' => $this->mapDiagnosisType($this->findColumn($row, [
+                'diagnosis_type'        => $this->mapDiagnosisType($this->findColumn($row, [
                     'clase_diagnostico',
                     'clasediagnostico',
                     'tipo_diagnostico',
                     'tipodiagnostico'
                 ])),
-                'status' => 'active',
-                'created_by_id' => auth()->id() ?? 1, // CORREGIDO: created_by_id
+                'status'                => 'active',
+                'created_by_id'         => auth()->id() ?? 1,
             ];
 
             $caseData = array_filter($caseData, fn($value) => $value !== null);
 
             if ($existingCase) {
-                $caseData['updated_by_id'] = auth()->id() ?? 1; // CORREGIDO: updated_by_id
+                $caseData['updated_by_id'] = auth()->id() ?? 1;
                 $existingCase->update($caseData);
                 return $existingCase;
             } else {
@@ -556,55 +561,53 @@ class TrastornosSheet implements ToCollection, WithHeadingRow
 
     private function processMonthlyFollowups(MentalDisorder $mentalDisorder, Collection $row, int $rowNumber)
     {
-        $months = [
-            'enero_2025' => 1,
-            'febrero_2025' => 2,
-            'marzo_2025' => 3,
-            'abril_2025' => 4,
-            'mayo_2025' => 5,
-            'junio_2025' => 6,
-            'julio_2025' => 7,
-            'agosto_2025' => 8,
-            'septiembre_2025' => 9,
-            'octubre_2025' => 10,
-            'noviembre_2025' => 11,
-            'diciembre_2025' => 12
-        ];
+        try {
+            $seguimientoData = $this->cleanString($this->findColumn($row, [
+                'seguimiento',
+                'seguimiento_mensual',
+                'seguimientomensual',
+                'seguim',
+            ]));
 
-        foreach ($months as $columnName => $monthNumber) {
-            try {
-                $followupData = $this->cleanString($this->findColumn($row, [$columnName]));
-
-                if (empty($followupData) || strlen($followupData) < 2) {
-                    continue;
-                }
-
-                $existingFollowup = MonthlyFollowup::where('followupable_id', $mentalDisorder->id)
-                    ->where('followupable_type', MentalDisorder::class)
-                    ->where('year', 2025)
-                    ->where('month', $monthNumber)
-                    ->first();
-
-                if ($existingFollowup) {
-                    continue;
-                }
-
-                MonthlyFollowup::create([
-                    'followupable_id' => $mentalDisorder->id,
-                    'followupable_type' => MentalDisorder::class,
-                    'followup_date' => Carbon::create(2025, $monthNumber, 15)->format('Y-m-d'),
-                    'year' => 2025,
-                    'month' => $monthNumber,
-                    'description' => "TRASTORNO MENTAL - " . substr($followupData, 0, 900),
-                    'status' => 'completed',
-                    'actions_taken' => json_encode(['Seguimiento trastorno mental']),
-                    'performed_by' => auth()->id() ?? 1,
-                ]);
-
-                $this->parent->incrementFollowups();
-            } catch (\Exception $e) {
-                $this->parent->addError("TRASTORNOS Fila {$rowNumber}: Error seguimiento {$columnName} - {$e->getMessage()}");
+            if (empty($seguimientoData) || strlen($seguimientoData) < 2) {
+                return;
             }
+
+            $admissionDate = $this->parseDate($this->findColumn($row, [
+                'fecha_ingreso',
+                'fechaingreso',
+                'fecha_infreso',
+                'fechainfreso'
+            ])) ?? now();
+
+            $month = $admissionDate->month;
+            $year  = $admissionDate->year;
+
+            $existingFollowup = MonthlyFollowup::where('followupable_id', $mentalDisorder->id)
+                ->where('followupable_type', MentalDisorder::class)
+                ->where('year', $year)
+                ->where('month', $month)
+                ->first();
+
+            if ($existingFollowup) {
+                return;
+            }
+
+            MonthlyFollowup::create([
+                'followupable_id'   => $mentalDisorder->id,
+                'followupable_type' => MentalDisorder::class,
+                'followup_date'     => Carbon::create($year, $month, 15)->format('Y-m-d'),
+                'year'              => $year,
+                'month'             => $month,
+                'description'       => "TRASTORNO MENTAL - " . substr($seguimientoData, 0, 900),
+                'status'            => 'completed',
+                'actions_taken'     => json_encode(['Seguimiento trastorno mental']),
+                'performed_by'      => auth()->id() ?? 1,
+            ]);
+
+            $this->parent->incrementFollowups();
+        } catch (\Exception $e) {
+            $this->parent->addError("TRASTORNOS Fila {$rowNumber}: Error seguimiento - {$e->getMessage()}");
         }
     }
 }
@@ -780,15 +783,17 @@ class Evento356Sheet implements ToCollection, WithHeadingRow
     private function createSuicideAttemptCase(Patient $patient, Collection $row, int $rowNumber)
     {
         try {
-            $existingCase = SuicideAttempt::where('patient_id', $patient->id)->first();
-
-            // IMPORTANTE: usar event_date no admission_date
             $eventDate = $this->parseDate($this->findColumn($row, [
                 'fecha_de_ingreso',
                 'fechadeingreso',
                 'fecha_ingreso',
                 'fechaingreso'
             ])) ?? now();
+
+            // Detectar duplicados: mismo paciente + misma fecha de evento
+            $existingCase = SuicideAttempt::where('patient_id', $patient->id)
+                ->whereDate('event_date', $eventDate->toDateString())
+                ->first();
 
             // Procesar factores de riesgo como JSON array
             $riskFactorsText = $this->cleanString($this->findColumn($row, [
@@ -868,55 +873,53 @@ class Evento356Sheet implements ToCollection, WithHeadingRow
 
     private function processMonthlyFollowups(SuicideAttempt $suicideAttempt, Collection $row, int $rowNumber)
     {
-        $months = [
-            'enero_2025' => 1,
-            'febrero_2025' => 2,
-            'marzo_2025' => 3,
-            'abril_2025' => 4,
-            'mayo_2025' => 5,
-            'junio_2025' => 6,
-            'julio_2025' => 7,
-            'agosto_2025' => 8,
-            'septiembre_2025' => 9,
-            'octubre_2025' => 10,
-            'noviembre_2025' => 11,
-            'diciembre_2025' => 12
-        ];
+        try {
+            $seguimientoData = $this->cleanString($this->findColumn($row, [
+                'seguimiento',
+                'seguimiento_mensual',
+                'seguimientomensual',
+                'seguim',
+            ]));
 
-        foreach ($months as $columnName => $monthNumber) {
-            try {
-                $followupData = $this->cleanString($this->findColumn($row, [$columnName]));
-
-                if (empty($followupData) || strlen($followupData) < 2) {
-                    continue;
-                }
-
-                $existingFollowup = MonthlyFollowup::where('followupable_id', $suicideAttempt->id)
-                    ->where('followupable_type', SuicideAttempt::class)
-                    ->where('year', 2025)
-                    ->where('month', $monthNumber)
-                    ->first();
-
-                if ($existingFollowup) {
-                    continue;
-                }
-
-                MonthlyFollowup::create([
-                    'followupable_id' => $suicideAttempt->id,
-                    'followupable_type' => SuicideAttempt::class,
-                    'followup_date' => Carbon::create(2025, $monthNumber, 15)->format('Y-m-d'),
-                    'year' => 2025,
-                    'month' => $monthNumber,
-                    'description' => "INTENTO SUICIDIO - " . substr($followupData, 0, 900),
-                    'status' => 'completed',
-                    'actions_taken' => json_encode(['Seguimiento intento suicidio']),
-                    'performed_by' => auth()->id() ?? 1,
-                ]);
-
-                $this->parent->incrementFollowups();
-            } catch (\Exception $e) {
-                $this->parent->addError("EVENTO 356 Fila {$rowNumber}: Error seguimiento {$columnName} - {$e->getMessage()}");
+            if (empty($seguimientoData) || strlen($seguimientoData) < 2) {
+                return;
             }
+
+            $eventDate = $this->parseDate($this->findColumn($row, [
+                'fecha_de_ingreso',
+                'fechadeingreso',
+                'fecha_ingreso',
+                'fechaingreso'
+            ])) ?? now();
+
+            $month = $eventDate->month;
+            $year  = $eventDate->year;
+
+            $existingFollowup = MonthlyFollowup::where('followupable_id', $suicideAttempt->id)
+                ->where('followupable_type', SuicideAttempt::class)
+                ->where('year', $year)
+                ->where('month', $month)
+                ->first();
+
+            if ($existingFollowup) {
+                return;
+            }
+
+            MonthlyFollowup::create([
+                'followupable_id'   => $suicideAttempt->id,
+                'followupable_type' => SuicideAttempt::class,
+                'followup_date'     => Carbon::create($year, $month, 15)->format('Y-m-d'),
+                'year'              => $year,
+                'month'             => $month,
+                'description'       => "INTENTO SUICIDIO - " . substr($seguimientoData, 0, 900),
+                'status'            => 'completed',
+                'actions_taken'     => json_encode(['Seguimiento intento suicidio']),
+                'performed_by'      => auth()->id() ?? 1,
+            ]);
+
+            $this->parent->incrementFollowups();
+        } catch (\Exception $e) {
+            $this->parent->addError("EVENTO 356 Fila {$rowNumber}: Error seguimiento - {$e->getMessage()}");
         }
     }
 }
@@ -1075,8 +1078,6 @@ class ConsumoSpaSheet implements ToCollection, WithHeadingRow
     private function createSubstanceConsumptionCase(Patient $patient, Collection $row, int $rowNumber)
     {
         try {
-            $existingCase = SubstanceConsumption::where('patient_id', $patient->id)->first();
-
             $admissionDate = $this->parseDate($this->findColumn($row, [
                 'fecha_de_ingres',
                 'fechadeingres',
@@ -1085,6 +1086,11 @@ class ConsumoSpaSheet implements ToCollection, WithHeadingRow
                 'fecha_ingreso',
                 'fechaingreso'
             ])) ?? now();
+
+            // Detectar duplicados: mismo paciente + misma fecha de admisión
+            $existingCase = SubstanceConsumption::where('patient_id', $patient->id)
+                ->whereDate('admission_date', $admissionDate->toDateString())
+                ->first();
 
             $diagnosis = $this->truncateString($this->cleanString($this->findColumn($row, [
                 'diagnostico',
@@ -1147,55 +1153,55 @@ class ConsumoSpaSheet implements ToCollection, WithHeadingRow
 
     private function processMonthlyFollowups(SubstanceConsumption $substanceConsumption, Collection $row, int $rowNumber)
     {
-        $months = [
-            'enero_2025' => 1,
-            'febrero_2025' => 2,
-            'marzo_2025' => 3,
-            'abril_2025' => 4,
-            'mayo_2025' => 5,
-            'junio_2025' => 6,
-            'julio_2025' => 7,
-            'agosto_2025' => 8,
-            'septiembre_2025' => 9,
-            'octubre_2025' => 10,
-            'noviembre_2025' => 11,
-            'diciembre_2025' => 12
-        ];
+        try {
+            $seguimientoData = $this->cleanString($this->findColumn($row, [
+                'seguimiento',
+                'seguimiento_mensual',
+                'seguimientomensual',
+                'seguim',
+            ]));
 
-        foreach ($months as $columnName => $monthNumber) {
-            try {
-                $followupData = $this->cleanString($this->findColumn($row, [$columnName]));
-
-                if (empty($followupData) || strlen($followupData) < 2) {
-                    continue;
-                }
-
-                $existingFollowup = MonthlyFollowup::where('followupable_id', $substanceConsumption->id)
-                    ->where('followupable_type', SubstanceConsumption::class)
-                    ->where('year', 2025)
-                    ->where('month', $monthNumber)
-                    ->first();
-
-                if ($existingFollowup) {
-                    continue;
-                }
-
-                MonthlyFollowup::create([
-                    'followupable_id' => $substanceConsumption->id,
-                    'followupable_type' => SubstanceConsumption::class,
-                    'followup_date' => Carbon::create(2025, $monthNumber, 15)->format('Y-m-d'),
-                    'year' => 2025,
-                    'month' => $monthNumber,
-                    'description' => "CONSUMO SPA - " . substr($followupData, 0, 900),
-                    'status' => 'completed',
-                    'actions_taken' => json_encode(['Seguimiento consumo SPA']),
-                    'performed_by' => auth()->id() ?? 1,
-                ]);
-
-                $this->parent->incrementFollowups();
-            } catch (\Exception $e) {
-                $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error seguimiento {$columnName} - {$e->getMessage()}");
+            if (empty($seguimientoData) || strlen($seguimientoData) < 2) {
+                return;
             }
+
+            $admissionDate = $this->parseDate($this->findColumn($row, [
+                'fecha_de_ingres',
+                'fechadeingres',
+                'fecha_de_ingreso',
+                'fechadeingreso',
+                'fecha_ingreso',
+                'fechaingreso'
+            ])) ?? now();
+
+            $month = $admissionDate->month;
+            $year  = $admissionDate->year;
+
+            $existingFollowup = MonthlyFollowup::where('followupable_id', $substanceConsumption->id)
+                ->where('followupable_type', SubstanceConsumption::class)
+                ->where('year', $year)
+                ->where('month', $month)
+                ->first();
+
+            if ($existingFollowup) {
+                return;
+            }
+
+            MonthlyFollowup::create([
+                'followupable_id'   => $substanceConsumption->id,
+                'followupable_type' => SubstanceConsumption::class,
+                'followup_date'     => Carbon::create($year, $month, 15)->format('Y-m-d'),
+                'year'              => $year,
+                'month'             => $month,
+                'description'       => "CONSUMO SPA - " . substr($seguimientoData, 0, 900),
+                'status'            => 'completed',
+                'actions_taken'     => json_encode(['Seguimiento consumo SPA']),
+                'performed_by'      => auth()->id() ?? 1,
+            ]);
+
+            $this->parent->incrementFollowups();
+        } catch (\Exception $e) {
+            $this->parent->addError("CONSUMO SPA Fila {$rowNumber}: Error seguimiento - {$e->getMessage()}");
         }
     }
 
