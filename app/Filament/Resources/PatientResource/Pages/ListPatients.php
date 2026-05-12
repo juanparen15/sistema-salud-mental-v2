@@ -262,14 +262,6 @@ class ListPatients extends ListRecords
                 ->modalHeading('Importar Sistema de Salud Mental')
                 ->slideOver(),
 
-            Actions\Action::make('viewStats')
-                ->label('Estadísticas del Sistema')
-                ->icon('heroicon-o-chart-bar')
-                ->color('info')
-                ->action(function () {
-                    $this->showSystemStatistics();
-                }),
-
             Actions\Action::make('exportTemplate')
                 ->label('Guía de Importación')
                 ->icon('heroicon-o-document-text')
@@ -394,46 +386,6 @@ class ListPatients extends ListRecords
         $message .= "</div>";
 
         return $message;
-    }
-
-    private function showSystemStatistics(): void
-    {
-        try {
-            $stats = [
-                'total_patients' => \App\Models\Patient::count(),
-                'mental_disorders' => \App\Models\MentalDisorder::count(),
-                'suicide_attempts' => \App\Models\SuicideAttempt::count(),
-                'substance_consumptions' => \App\Models\SubstanceConsumption::count(),
-                'total_followups' => \App\Models\MonthlyFollowup::count(),
-                'followups_2025' => \App\Models\MonthlyFollowup::where('year', 2025)->count(),
-                'recent_followups' => \App\Models\MonthlyFollowup::where('followup_date', '>=', now()->subDays(30))->count(),
-                'pending_followups' => \App\Models\MonthlyFollowup::where('status', 'pending')->count(),
-            ];
-
-            $message = "<div class='grid grid-cols-2 gap-3 text-sm'>";
-            $message .= "<div><strong>Pacientes Total:</strong> <span class='text-blue-600'>{$stats['total_patients']}</span></div>";
-            $message .= "<div><strong>Trastornos Mentales:</strong> <span class='text-blue-600'>{$stats['mental_disorders']}</span></div>";
-            $message .= "<div><strong>Intentos Suicidio:</strong> <span class='text-red-600'>{$stats['suicide_attempts']}</span></div>";
-            $message .= "<div><strong>Casos SPA:</strong> <span class='text-orange-600'>{$stats['substance_consumptions']}</span></div>";
-            $message .= "<div><strong>Seguimientos Total:</strong> <span class='text-purple-600'>{$stats['total_followups']}</span></div>";
-            $message .= "<div><strong>Seguimientos 2025:</strong> <span class='text-purple-600'>{$stats['followups_2025']}</span></div>";
-            $message .= "<div><strong>Recientes (30d):</strong> <span class='text-green-600'>{$stats['recent_followups']}</span></div>";
-            $message .= "<div><strong>Pendientes:</strong> <span class='text-yellow-600'>{$stats['pending_followups']}</span></div>";
-            $message .= "</div>";
-
-            Notification::make()
-                ->title('Estadísticas del Sistema de Salud Mental')
-                ->body($message)
-                ->info()
-                ->duration(12000)
-                ->send();
-        } catch (Exception $e) {
-            Notification::make()
-                ->title('Error al obtener estadísticas')
-                ->body('No se pudieron cargar las estadísticas: ' . $e->getMessage())
-                ->danger()
-                ->send();
-        }
     }
 
     protected function getHeaderWidgets(): array

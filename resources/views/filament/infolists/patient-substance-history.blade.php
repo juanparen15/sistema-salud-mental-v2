@@ -1,6 +1,6 @@
 {{-- Historial de consumo SPA del paciente --}}
 @php
-    $currentRecord = $getRecord();
+    $currentRecord = isset($record) ? $record : $getRecord();
     $patient = $currentRecord->patient;
 
     $allCases = \App\Models\SubstanceConsumption::where('patient_id', $patient->id)

@@ -1,6 +1,6 @@
 {{-- Historial de intentos de suicidio del paciente --}}
 @php
-    $currentRecord = $getRecord();
+    $currentRecord = isset($record) ? $record : $getRecord();
     $patient = $currentRecord->patient;
 
     $allCases = \App\Models\SuicideAttempt::where('patient_id', $patient->id)

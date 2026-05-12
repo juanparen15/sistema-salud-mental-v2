@@ -139,6 +139,17 @@ class ViewMentalDisorder extends ViewRecord
     protected function getHeaderActions(): array
     {
         return [
+            Actions\Action::make('patientHistory')
+                ->label('Historial del Paciente')
+                ->icon('heroicon-o-clock')
+                ->color('gray')
+                ->modalHeading(fn () => 'Historial — ' . $this->getRecord()->patient->full_name)
+                ->modalContent(fn () => view('filament.infolists.patient-history', [
+                    'record' => $this->getRecord(),
+                ]))
+                ->modalWidth('3xl')
+                ->modalSubmitAction(false)
+                ->modalCancelActionLabel('Cerrar'),
             Actions\EditAction::make(),
             Actions\DeleteAction::make(),
         ];
