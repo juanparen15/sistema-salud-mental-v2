@@ -65,10 +65,9 @@ class ListMonthlyFollowups extends ListRecords
                 ->color('danger')
                 ->action(function () {
                     $this->tableFilters['overdue_followups']['isActive'] = true;
-                    $this->updatedTableFilters();
 
                     Notification::make()
-                        ->title('Mostrando seguimientos vencidos')
+                        ->title('Mostrando citas vencidas')
                         ->info()
                         ->send();
                 })

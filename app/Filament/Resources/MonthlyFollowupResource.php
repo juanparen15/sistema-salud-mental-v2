@@ -288,6 +288,14 @@ class MonthlyFollowupResource extends Resource
                     ->label('Solo Pendientes')
                     ->query(fn(Builder $query) => $query->where('status', 'pending'))
                     ->toggle(),
+
+                Tables\Filters\Filter::make('overdue_followups')
+                    ->label('Citas vencidas')
+                    ->query(fn(Builder $query) => $query
+                        ->whereNotNull('next_followup')
+                        ->where('next_followup', '<', now())
+                    )
+                    ->toggle(),
             ])
             ->actions([
                 Tables\Actions\ViewAction::make(),

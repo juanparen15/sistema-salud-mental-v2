@@ -6,9 +6,11 @@
 namespace App\Filament\Resources;
 
 use App\Filament\Resources\SuicideAttemptResource\Pages;
+use App\Models\MonthlyFollowup;
 use App\Models\SuicideAttempt;
 use Filament\Forms;
 use Filament\Forms\Form;
+use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
@@ -179,6 +181,64 @@ class SuicideAttemptResource extends Resource
                     ]),
             ])
             ->actions([
+                Tables\Actions\Action::make('seguimientoRapido')
+                    ->label('Seguimiento rápido')
+                    ->icon('heroicon-o-plus-circle')
+                    ->color('success')
+                    ->modalHeading(fn (SuicideAttempt $record) => 'Seguimiento — ' . $record->patient->full_name)
+                    ->modalDescription(fn (SuicideAttempt $record) =>
+                        'Intento #' . ($record->attempt_number ?? 1) .
+                        ' · ' . ($record->event_date ? $record->event_date->format('d/m/Y') : 'Sin fecha') .
+                        ' · ' . now()->isoFormat('MMMM YYYY')
+                    )
+                    ->form([
+                        Forms\Components\Textarea::make('description')
+                            ->label('Notas del seguimiento')
+                            ->placeholder('Describa brevemente el estado del paciente...')
+                            ->required()
+                            ->rows(3),
+                        Forms\Components\Select::make('status')
+                            ->label('Estado')
+                            ->options([
+                                'completed'     => 'Completado',
+                                'not_contacted' => 'No contactado',
+                                'refused'       => 'Rechazado',
+                            ])
+                            ->default('completed')
+                            ->required(),
+                    ])
+                    ->action(function (SuicideAttempt $record, array $data) {
+                        $exists = MonthlyFollowup::where('followupable_id', $record->id)
+                            ->where('followupable_type', SuicideAttempt::class)
+                            ->where('year', now()->year)
+                            ->where('month', now()->month)
+                            ->exists();
+
+                        if ($exists) {
+                            Notification::make()
+                                ->title('Ya existe un seguimiento para ' . now()->isoFormat('MMMM [de] YYYY'))
+                                ->warning()
+                                ->send();
+                            return;
+                        }
+
+                        MonthlyFollowup::create([
+                            'followupable_id'   => $record->id,
+                            'followupable_type' => SuicideAttempt::class,
+                            'followup_date'     => now()->format('Y-m-d'),
+                            'year'              => now()->year,
+                            'month'             => now()->month,
+                            'description'       => $data['description'],
+                            'status'            => $data['status'],
+                            'actions_taken'     => ['Seguimiento rápido'],
+                            'performed_by'      => auth()->id() ?? 1,
+                        ]);
+
+                        Notification::make()
+                            ->title('Seguimiento registrado correctamente')
+                            ->success()
+                            ->send();
+                    }),
                 Tables\Actions\ViewAction::make(),
                 Tables\Actions\EditAction::make(),
                 Tables\Actions\DeleteAction::make(),
